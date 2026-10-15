@@ -364,6 +364,13 @@ def coverage() -> dict[str, Any]:
     return {"leagues": out}
 
 
+@app.get("/api/live/base")
+def live_base_endpoint() -> dict[str, Any]:
+    from .live import live_base
+
+    return live_base(con())
+
+
 @app.get("/api/leagues")
 def leagues() -> dict[str, Any]:
     return {"leagues": [{"slug": lg.slug, "name": lg.name, "country": lg.country, "is_cup": lg.is_cup} for lg in LEAGUES]}

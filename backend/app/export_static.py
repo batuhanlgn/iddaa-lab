@@ -39,6 +39,9 @@ def export(out: Path) -> dict[str, int]:
     _write(out, "performance.json", api.performance())
     _write(out, "status.json", api.status())
     _write(out, "coverage.json", api.coverage())
+    from .live import live_base
+
+    _write(out, "live_base.json", live_base(con))
     return {"matches": len(matches["items"]), "details": n_detail}
 
 

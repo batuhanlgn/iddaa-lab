@@ -2,9 +2,9 @@ name: Güncelle ve yayınla
 
 on:
   schedule:
-    # Saatte bir. Saat 3'ün katıysa tam güncelleme (refresh), değilse yaklaşan maçların resmi kadroları ve
-    # oranlarıyla yeniden tahmin (lineups). Pazartesi 02 UTC: ek olarak walk-forward backtest.
-    - cron: "7 * * * *"
+    # 30 dakikada bir. Saat 3'ün katının ilk yarısındaki çalışma tam güncelleme (refresh), diğerleri yaklaşan
+    # maçların resmi kadroları ve güncel oranlarıyla yeniden tahmin (lineups). Canlı skor/oran ise tarayıcıda 20 sn'de bir.
+    - cron: "7,37 * * * *"
     - cron: "37 2 * * 1"   # haftalık backtest (ayrı zamanlama: gecikse de atlanmaz)
   workflow_dispatch:
     inputs:
@@ -80,14 +80,14 @@ jobs:
       - name: Çalıştırılacak işi seç
         id: pick
         run: |
-          H=$(date -u +%H)
+          H=$(date -u +%H); M=$(date -u +%M)
           if [ "$HAVE_DB" != "1" ]; then
             echo "jobs=bootstrap" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "jobs=${{ inputs.job }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event.schedule }}" = "37 2 * * 1" ]; then
             echo "jobs=backtest refresh" >> "$GITHUB_OUTPUT"
-          elif [ $((10#$H % 3)) -eq 0 ]; then
+          elif [ $((10#$H % 3)) -eq 0 ] && [ $((10#$M)) -lt 30 ]; then
             echo "jobs=refresh" >> "$GITHUB_OUTPUT"
           else
             echo "jobs=lineups" >> "$GITHUB_OUTPUT"

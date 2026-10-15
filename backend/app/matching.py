@@ -12,6 +12,8 @@ _TR = str.maketrans({"ç": "c", "ğ": "g", "ı": "i", "İ": "i", "ö": "o", "ş"
 _STOP = {
     "fc", "fk", "sk", "cf", "afc", "ac", "as", "sc", "club", "de", "the", "jk", "cd", "ud", "sd", "rc", "if", "bk", "ff",
     "spor", "kulubu", "calcio", "sv", "vfb", "vfl", "tsg", "1.", "ssc", "us", "ss", "ca", "cr", "se", "ec", "sad", "a.s.",
+    # Arapça/İspanyolca/İtalyanca artikeller: farklı takımları benzer gösteriyordu (ör. "Al Hashemehya" ~ "Al Khaleej")
+    "al", "el", "la", "le", "los", "real", "club", "u21", "u23", "ii", "b",
 }
 _SYN = {
     "kizil yildiz": "crvena zvezda red star belgrade",
@@ -51,8 +53,22 @@ def norm(name: str) -> str:
     return s
 
 
+# iddaa'nın Türkçe şehir/kulüp adları -> uluslararası karşılıkları (kelime düzeyinde)
+_TOKEN_SYN = {
+    "marsilya": "marseille", "kopenhag": "kobenhavn", "prag": "prague", "sofya": "sofia", "lizbon": "lisbon",
+    "munih": "munich", "atina": "athens", "viyana": "wien", "bruksel": "brussels", "belgrad": "belgrade",
+    "varsova": "warsaw", "napoli": "napoli", "roma": "roma", "kiev": "kyiv", "moskova": "moscow",
+}
+
+
 def tokens(s: str) -> set[str]:
-    return {t.strip(".") for t in s.split() if t.strip(".") and t not in _STOP and t.strip(".") not in _STOP}
+    out = set()
+    for t in s.split():
+        t = t.strip(".")
+        if not t or t in _STOP:
+            continue
+        out.add(_TOKEN_SYN.get(t, t))
+    return out
 
 
 def similarity(a: str, b: str) -> float:
@@ -98,7 +114,8 @@ def match_iddaa_events(con: sqlite3.Connection) -> dict[str, int]:
                     similarity(e["away_name"], r["an"]), similarity(e["away_name"], r["as_"] or r["an"]))
                 time_bonus = 0.1 if abs((t - ko).total_seconds()) <= 20 * 60 else 0.0
                 sc = sh + sa + time_bonus
-                ok = (sh >= 0.5 and sa >= 0.5) or (max(sh, sa) >= 0.9 and min(sh, sa) >= 0.25 and time_bonus > 0)
+                # İki takımın da makul benzer olması, ya da biri neredeyse kesin + saat birebir + diğeri zayıf da olsa benzer
+                ok = (sh >= 0.62 and sa >= 0.62) or (max(sh, sa) >= 0.9 and min(sh, sa) >= 0.35 and time_bonus > 0)
                 if ok and sc > best[0]:
                     best = (sc, r, sh, sa)
             sc, r, sh, sa = best
