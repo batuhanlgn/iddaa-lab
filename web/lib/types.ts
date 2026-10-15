@@ -440,7 +440,22 @@ export interface TrackedPick {
   result: string | null;
 }
 
+export interface LivePicksSummary {
+  n: number;
+  settled: number;
+  won: number;
+  hit_rate: number | null;
+  expected_hit_rate: number | null;
+  roi: number | null;
+  by_market: Record<string, { n: number; won: number; hit_rate: number | null; expected_hit_rate: number | null; roi: number | null }>;
+  recent: {
+    match_id: string; home: string; away: string; created_at: string; minute: number; score: string; market: string;
+    sov: string; outcome: string; odd: number; p_model: number; ev: number; status: string;
+  }[];
+}
+
 export interface PerformanceResponse {
+  live_picks: LivePicksSummary | null;
   tracking: { updated_at: string; groups: Record<string, TrackingGroup>; recent_picks: TrackedPick[]; family_labels: Record<string, string> } | null;
   player_calibration: Record<string, { a: number; b: number; use: boolean; cv_ll_raw: number | null; cv_ll_cal: number | null; n: number }> | null;
   backtest: Backtest | null;

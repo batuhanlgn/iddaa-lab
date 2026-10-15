@@ -8,8 +8,10 @@ import {
 } from "@/lib/live-feed";
 import type { GeneratedCoupon } from "@/lib/types";
 import { EmptyState, SectionTitle } from "../ui";
+import Link from "next/link";
+import { odd, pct, signedPct } from "@/lib/format";
 import CouponTracker from "./CouponTracker";
-import LiveMatchCard from "./LiveMatchCard";
+import LiveMatchCard, { liveValuePicks, OUT, type LivePick } from "./LiveMatchCard";
 
 const POLL_MS = 20_000;
 const PLAYER_EVERY = 3; // oyuncu istatistikleri her 3 turda bir (60 sn)
@@ -95,6 +97,11 @@ export default function LiveBoard({ base, coupons }: { base: LiveBase; coupons: 
     else if (k > now - 30 * 60_000 && k <= now + 3 * 3600_000) upcoming.push(it);
   }
 
+  const picks: LivePick[] = live
+    .flatMap((it) => liveValuePicks(it, feed.espn.get(it.id), matchIddaa(it, feed.iddaa)))
+    .sort((a, b) => b.ev - a.ev)
+    .slice(0, 5);
+
   return (
     <div className="flex flex-col gap-8">
       <div className="panel flex flex-wrap items-center gap-3 px-4 py-3 text-sm">
@@ -117,6 +124,59 @@ export default function LiveBoard({ base, coupons }: { base: LiveBase; coupons: 
           </p>
         )}
       </div>
+
+      <section>
+        <SectionTitle right={<span className="kicker">deneysel · kayıt altında</span>}>Canlı öneriler</SectionTitle>
+        {live.length === 0 ? (
+          <p className="panel px-4 py-3 text-sm text-ink-2">Oynanan maç başladığında, kriterlere uyan canlı seçimler burada listelenir.</p>
+        ) : picks.length === 0 ? (
+          <p className="panel px-4 py-3 text-sm text-ink-2">
+            Şu an kriterlere uyan canlı seçim yok. {live.length} maç taranıyor; liste 20 saniyede bir güncellenir.
+          </p>
+        ) : (
+          <div className="panel overflow-x-auto">
+            <table className="w-full min-w-[640px] text-sm">
+              <thead className="text-left text-xs text-muted">
+                <tr>
+                  <th className="px-4 py-2 font-medium">Maç</th>
+                  <th className="px-2 py-2 font-medium">Seçim</th>
+                  <th className="px-2 py-2 text-right font-medium">Oran</th>
+                  <th className="px-2 py-2 text-right font-medium" title="Canlı model / iddaa (marjsız)">Model / piyasa</th>
+                  <th className="px-4 py-2 text-right font-medium">EV</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line/60">
+                {picks.map((p) => (
+                  <tr key={`${p.item.id}-${p.market}-${p.name}`} className="bg-good/5">
+                    <td className="px-4 py-2">
+                      <Link href={`/mac/${p.item.id}`} className="font-medium hover:underline">
+                        {p.item.home.name} – {p.item.away.name}
+                      </Link>
+                      <p className="num text-xs text-muted">
+                        {p.espn.state.home}-{p.espn.state.away} · {p.espn.clock || `${p.espn.state.minute}'`}
+                        {p.espn.state.redHome + p.espn.state.redAway > 0 ? " · kırmızı kart var" : ""}
+                      </p>
+                    </td>
+                    <td className="px-2 py-2">
+                      {p.market}: <b>{OUT[p.name] ?? p.name}</b>
+                    </td>
+                    <td className="num px-2 py-2 text-right font-semibold">{odd(p.odd)}</td>
+                    <td className="num px-2 py-2 text-right">
+                      {pct(p.p)} <span className="text-muted">/ {pct(p.q)}</span>
+                    </td>
+                    <td className="num px-4 py-2 text-right font-semibold text-good-ink">▲ {signedPct(p.ev)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <p className="mt-2 text-xs leading-relaxed text-muted">
+          Kriter: beklenen değer ≥ %5, olasılık ≥ %25, oran 1.30–8.00, 85. dakikadan önce, model piyasanın en fazla 1,5 katı
+          iyimser, maç düşük güvenli değil. Oranlar saniyeler içinde değişir; oynamadan önce iddaa&apos;da kontrol et. Öneriler
+          15 dakikada bir sunucuda kaydedilir ve sonuçları Performans sayfasında izlenir.
+        </p>
+      </section>
 
       <section>
         <SectionTitle right={<span className="kicker">{live.length} maç</span>}>Şu an oynananlar</SectionTitle>

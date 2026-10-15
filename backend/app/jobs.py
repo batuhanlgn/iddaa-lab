@@ -73,6 +73,13 @@ def _prepare(con, progress: Progress) -> None:
 
 
 def _finish_cycle(con, progress: Progress) -> None:
+    from .live_picks import record_live_picks, settle_live_picks
+
+    try:
+        progress(f"Canlı öneriler: {record_live_picks(con)} · sonuçlandırma {settle_live_picks(con)}")
+    except Exception as e:  # noqa: BLE001 - canlı kaynak hatası ana güncellemeyi durdurmasın
+        log.exception("Canlı öneri kaydı başarısız")
+        progress(f"UYARI: canlı öneriler kaydedilemedi ({type(e).__name__}: {e})")
     progress(f"Kupon sonuçlandırma: {coupons.settle(con)}")
     progress(f"Öneri/CLV takibi: {update_tracking(con)}")
     gen = coupons.generate(con, days=3, archive=True)

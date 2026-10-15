@@ -313,6 +313,12 @@ def players_top(days: float = Query(3, ge=0.2, le=7), limit: int = Query(60, ge=
     return {"items": out[:limit], "total": len(out)}
 
 
+def _live_summary(c: Any) -> dict[str, Any]:
+    from .live_picks import live_picks_summary
+
+    return live_picks_summary(c)
+
+
 @app.get("/api/performance")
 def performance() -> dict[str, Any]:
     c = con()
@@ -321,6 +327,7 @@ def performance() -> dict[str, Any]:
         "player_backtest": db.meta_get(c, "player_backtest"),
         "blend_calibration": db.meta_get(c, "blend_calibration"),
         "tracking": db.meta_get(c, "tracking"),
+        "live_picks": _live_summary(c),
         "player_calibration": db.meta_get(c, "player_calibration"),
         "coupons": coupons.history(c, limit=500)["summary"],
         "league_names": {lg.slug: f"{lg.country} · {lg.name}" for lg in LEAGUES},

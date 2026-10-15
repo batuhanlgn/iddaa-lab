@@ -7,8 +7,13 @@ import { liveDist, nextGoalProbs, outcomeCond, pickStatus, restOfMatchProbs, typ
 import { Crest, ProbBar } from "../ui";
 import StatusChip from "./StatusChip";
 
-const VALUE_EV = 0.05;
-const VALUE_MIN_P = 0.25;
+// Sunucudaki kayıtla birebir aynı kriterler (backend/app/live_picks.py)
+export const VALUE_EV = 0.05;
+export const VALUE_MIN_P = 0.25;
+export const VALUE_MIN_ODDS = 1.3;
+export const VALUE_MAX_ODDS = 8;
+export const VALUE_MAX_MINUTE = 85;
+export const VALUE_MAX_EDGE = 1.5; // model ≤ 1.5 × piyasa (marjsız)
 
 function RedCards({ n }: { n: number }) {
   if (n <= 0) return null;
@@ -35,39 +40,77 @@ function statusBadge(e: EspnLive | undefined, item: LiveBaseItem) {
 
 interface Row {
   label: string;
-  outcomes: { name: string; odd: number; p: number | null }[];
+  outcomes: { name: string; odd: number; p: number | null; q: number }[];
 }
 
-function marketRows(il: IddaaLive, pre: PreModel, e: EspnLive): Row[] {
+function withMarket(outs: { name: string; odd: number; p: number | null }[]): Row["outcomes"] {
+  const inv = outs.reduce((a, o) => a + 1 / o.odd, 0);
+  return outs.map((o) => ({ ...o, q: inv > 0 ? 1 / o.odd / inv : 0 }));
+}
+
+export function isValue(o: { odd: number; p: number | null; q: number }, minute: number, lowConf: boolean): boolean {
+  if (o.p == null || lowConf || minute > VALUE_MAX_MINUTE) return false;
+  if (o.odd < VALUE_MIN_ODDS || o.odd > VALUE_MAX_ODDS) return false;
+  return o.p >= VALUE_MIN_P && o.p * o.odd - 1 >= VALUE_EV && o.p <= VALUE_MAX_EDGE * o.q;
+}
+
+export function marketRows(il: IddaaLive, pre: PreModel, e: EspnLive): Row[] {
   const dist = liveDist(pre, e.state);
   const rows: Row[] = [];
   for (const m of il.markets) {
     if (m.st === 4) {
-      rows.push({ label: "Maç sonucu", outcomes: m.outcomes.map((o) => {
+      rows.push({ label: "Maç sonucu", outcomes: withMarket(m.outcomes.map((o) => {
         const c = outcomeCond("ms", null, o.name);
         return { name: o.name, odd: o.odd, p: c ? dist.prob(c) : null };
-      }) });
+      })) });
     } else if (m.st === 14 && m.sov) {
-      rows.push({ label: `Alt/Üst ${m.sov}`, outcomes: m.outcomes.map((o) => {
+      rows.push({ label: `Alt/Üst ${m.sov}`, outcomes: withMarket(m.outcomes.map((o) => {
         const c = outcomeCond("au", m.sov, o.name);
         return { name: o.name, odd: o.odd, p: c ? dist.prob(c) : null };
-      }) });
+      })) });
     } else if (m.st === 34) {
       const ng = nextGoalProbs(pre, e.state);
-      rows.push({ label: `${m.sov ?? "Sıradaki"}. golü kim atar`, outcomes: m.outcomes.map((o) => ({
+      rows.push({ label: `${m.sov ?? "Sıradaki"}. golü kim atar`, outcomes: withMarket(m.outcomes.map((o) => ({
         name: o.name, odd: o.odd, p: o.name === "1" ? ng.home : o.name === "2" ? ng.away : o.name === "Olmaz" ? ng.none : null,
-      })) });
+      }))) });
     } else if (m.st === 23) {
       const r = restOfMatchProbs(pre, e.state);
-      rows.push({ label: "Kalan süre sonucu", outcomes: m.outcomes.map((o) => ({
+      rows.push({ label: "Kalan süre sonucu", outcomes: withMarket(m.outcomes.map((o) => ({
         name: o.name, odd: o.odd, p: o.name in r ? r[o.name as "1" | "0" | "2"] : null,
-      })) });
+      }))) });
     }
   }
   return rows;
 }
 
-const OUT: Record<string, string> = { "0": "X", Olmaz: "Gol yok" };
+export const OUT: Record<string, string> = { "0": "X", Olmaz: "Gol yok" };
+
+export interface LivePick {
+  item: LiveBaseItem;
+  espn: EspnLive;
+  market: string;
+  name: string;
+  odd: number;
+  p: number;
+  q: number;
+  ev: number;
+}
+
+/** Bir maçtaki canlı öneri adayları (kartla ve sunucu kaydıyla aynı kriter). */
+export function liveValuePicks(item: LiveBaseItem, espn: EspnLive | undefined, il: IddaaLive | null): LivePick[] {
+  const s = espn?.state;
+  if (!espn || !il || !s || !s.started || s.finished) return [];
+  const lowConf = item.model.confidence === "düşük";
+  const out: LivePick[] = [];
+  for (const r of marketRows(il, item.model, espn)) {
+    for (const o of r.outcomes) {
+      if (o.p != null && isValue(o, s.minute, lowConf)) {
+        out.push({ item, espn, market: r.label, name: o.name, odd: o.odd, p: o.p, q: o.q, ev: o.p * o.odd - 1 });
+      }
+    }
+  }
+  return out;
+}
 
 export default function LiveMatchCard({ item, espn, il }: { item: LiveBaseItem; espn: EspnLive | undefined; il: IddaaLive | null }) {
   const pre: PreModel = item.model;
@@ -172,7 +215,7 @@ export default function LiveMatchCard({ item, espn, il }: { item: LiveBaseItem; 
                   <td className="px-3 py-1.5 text-ink-2">{r.label}</td>
                   {r.outcomes.map((o) => {
                     const ev = o.p != null ? o.p * o.odd - 1 : null;
-                    const value = ev != null && o.p != null && ev >= VALUE_EV && o.p >= VALUE_MIN_P && !lowConf;
+                    const value = isValue(o, s?.minute ?? 0, lowConf);
                     return (
                       <td key={o.name} className={`px-1.5 py-1.5 text-right ${value ? "bg-good/10" : ""}`}>
                         <div className="num whitespace-nowrap font-semibold">

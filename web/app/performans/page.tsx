@@ -80,6 +80,7 @@ async function Perf() {
       </section>
 
       {d.tracking && <TrackingSection t={d.tracking} />}
+      {d.live_picks && <LivePicksSection s={d.live_picks} />}
 
       <section>
         <SectionTitle right={<span className="kicker">değerlendirme dilimi · sızıntısız haftalık yeniden eğitim</span>}>Pazar aileleri</SectionTitle>
@@ -346,6 +347,54 @@ function TrackingSection({ t }: { t: NonNullable<PerformanceResponse["tracking"]
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function LivePicksSection({ s }: { s: NonNullable<PerformanceResponse["live_picks"]> }) {
+  const tone = (v: number | null) => (v == null ? "" : v > 0 ? "text-good-ink" : v < 0 ? "text-critical-ink" : "");
+  return (
+    <section>
+      <SectionTitle right={<span className="kicker">{s.n} öneri · {s.settled} sonuçlandı</span>}>Canlı öneriler</SectionTitle>
+      {s.n === 0 ? (
+        <EmptyState title="Henüz canlı öneri kaydı yok">Maçlar oynanırken kriterlere uyan canlı seçimler 15 dakikada bir kaydedilir.</EmptyState>
+      ) : (
+        <div className="flex flex-col gap-4">
+          <div className="panel grid grid-cols-2 gap-4 p-5 sm:grid-cols-4">
+            <Stat label="İsabet" value={s.hit_rate == null ? "–" : pct(s.hit_rate)} sub={`model beklentisi ${s.expected_hit_rate == null ? "–" : pct(s.expected_hit_rate)}`} />
+            <Stat label="ROI (1 birim)" value={<span className={tone(s.roi)}>{s.roi == null ? "–" : signedPct(s.roi)}</span>} sub={`${s.won}/${s.settled} tuttu`} />
+            {Object.entries(s.by_market).slice(0, 2).map(([k, g]) => (
+              <Stat key={k} label={k} value={g.hit_rate == null ? "–" : pct(g.hit_rate)} sub={`${g.won}/${g.n} · ROI ${g.roi == null ? "–" : signedPct(g.roi)}`} />
+            ))}
+          </div>
+          <div className="panel overflow-x-auto">
+            <table className="w-full min-w-[720px] text-sm">
+              <thead className="text-left text-xs text-muted">
+                <tr>
+                  <th className="px-4 py-2 font-medium">Maç</th>
+                  <th className="px-2 py-2 font-medium">Dakika · skor</th>
+                  <th className="px-2 py-2 font-medium">Seçim</th>
+                  <th className="px-2 py-2 text-right font-medium">Oran · model</th>
+                  <th className="px-4 py-2 font-medium">Sonuç</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-line/60">
+                {s.recent.slice(0, 25).map((r) => (
+                  <tr key={`${r.match_id}-${r.market}-${r.sov}-${r.outcome}`}>
+                    <td className="px-4 py-1.5">{r.home} – {r.away}</td>
+                    <td className="num px-2 py-1.5 text-ink-2">{r.minute}&apos; · {r.score}</td>
+                    <td className="px-2 py-1.5">{r.market}{r.sov && !r.sov.includes(":") ? ` ${r.sov}` : ""}: <b>{r.outcome === "0" ? "X" : r.outcome}</b></td>
+                    <td className="num px-2 py-1.5 text-right">{odd(r.odd)} · {pct(r.p_model)}</td>
+                    <td className={`px-4 py-1.5 text-xs ${r.status === "won" ? "text-good-ink" : r.status === "lost" ? "text-critical-ink" : "text-muted"}`}>
+                      {r.status === "won" ? "✓ tuttu" : r.status === "lost" ? "✕ yattı" : r.status === "void" ? "↺ iade" : "● bekliyor"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
     </section>
