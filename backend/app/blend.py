@@ -18,7 +18,7 @@ import numpy as np
 from . import db
 from .config import BLEND_MIN_SETTLED, BLEND_WEIGHT_DEFAULT
 from .model import markets as mk
-from .model.goals import score_matrix
+from .model.goals import score_matrix, score_matrix_cal
 from .model.market_fit import blend_matrix, ms_probs
 
 GRID = np.round(np.linspace(0, 1, 21), 2)
@@ -28,26 +28,22 @@ def settled_samples(con: sqlite3.Connection) -> list[dict]:
     rows = con.execute(
         """SELECT m.id, m.date_utc, m.ft90_home, m.ft90_away FROM matches m
            WHERE m.completed=1 AND m.ft90_home IS NOT NULL
-             AND EXISTS (SELECT 1 FROM iddaa_events e WHERE e.espn_match_id = m.id)
+             AND EXISTS (SELECT 1 FROM prediction_log l WHERE l.match_id = m.id AND l.mkt_lambda_home IS NOT NULL)
            ORDER BY m.date_utc"""
     ).fetchall()
     out = []
     for r in rows:
-        pr = con.execute(
-            "SELECT payload FROM predictions WHERE match_id=? AND created_at < ? ORDER BY created_at DESC LIMIT 1",
+        lg = con.execute(
+            """SELECT * FROM prediction_log WHERE match_id=? AND created_at < ? AND mkt_lambda_home IS NOT NULL
+                 AND ms_market_actual IS NOT NULL ORDER BY created_at DESC LIMIT 1""",
             (r["id"], r["date_utc"]),
         ).fetchone()
-        if pr is None:
+        if lg is None:
             continue
-        p = json.loads(pr["payload"])
-        mm = (p.get("iddaa") or {}).get("market_model")
-        model = p.get("model")
-        if not mm or not model or not mm.get("ms_market_actual"):
-            continue
-        sm_m = score_matrix(model["lambda_home"], model["lambda_away"], model["rho"])
-        sm_q = score_matrix(mm["lambda_home"], mm["lambda_away"], model["rho"])
+        sm_m = score_matrix_cal(lg["lambda_home"], lg["lambda_away"], lg["rho"], lg["cal_t"], lg["cal_g"])
+        sm_q = score_matrix(lg["mkt_lambda_home"], lg["mkt_lambda_away"], lg["rho"])
         y = 0 if r["ft90_home"] > r["ft90_away"] else 1 if r["ft90_home"] == r["ft90_away"] else 2
-        out.append({"date": r["date_utc"], "sm_m": sm_m, "sm_q": sm_q, "q": mm["ms_market_actual"], "y": y})
+        out.append({"date": r["date_utc"], "sm_m": sm_m, "sm_q": sm_q, "q": json.loads(lg["ms_market_actual"]), "y": y})
     return out
 
 

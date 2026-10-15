@@ -29,9 +29,14 @@ PARAMS_PATH = DATA_DIR / "model_params.json"
 MODEL_VERSION = "v1"
 
 
-def load_params() -> dict[str, float]:
-    p = {"xi": DEFAULT_XI, "sigma": DEFAULT_SIGMA, "tau": DEFAULT_TAU}
-    if PARAMS_PATH.exists():
+def load_params(con: sqlite3.Connection | None = None) -> dict[str, float]:
+    """Model hiperparametreleri veritabanında saklanır (GitHub'da yalnızca veritabanı çalışmalar arasında taşınır).
+    Eski kurulumlardaki model_params.json dosyası geçiş için okunur."""
+    p = {"xi": DEFAULT_XI, "sigma": DEFAULT_SIGMA, "tau": DEFAULT_TAU, "alpha": 1.0, "cal_t": 1.0, "cal_g": 1.0}
+    stored = db.meta_get(con, "model_params") if con is not None else None
+    if isinstance(stored, dict):
+        p.update({k: float(v) for k, v in stored.items() if k in p})
+    elif PARAMS_PATH.exists():
         try:
             p.update({k: float(v) for k, v in json.loads(PARAMS_PATH.read_text(encoding="utf-8")).items() if k in p})
         except (ValueError, OSError) as e:
@@ -96,8 +101,9 @@ def _fit_aux(matches: list[MatchRecord], values: dict[str, tuple[float, float]],
 def fit_all(con: sqlite3.Connection, as_of: datetime | None = None, params: dict[str, float] | None = None,
             with_aux: bool = True) -> FittedModels:
     as_of = as_of or datetime.now(timezone.utc)
-    params = params or load_params()
-    gm, matches, _ = fit_goal_model(con, as_of, params["xi"], params["sigma"], params["tau"])
+    params = params or load_params(con)
+    gm, matches, _ = fit_goal_model(con, as_of, params["xi"], params["sigma"], params["tau"], params.get("alpha", 1.0),
+                                    params.get("cal_t", 1.0), params.get("cal_g", 1.0))
     before = gm.as_of
     shots = corners = None
     if with_aux:
@@ -274,7 +280,7 @@ def predict_match(con: sqlite3.Connection, fm: FittedModels, match: sqlite3.Row,
     lh, la = rates
     level, notes = fm.goals.confidence(comp, home, away)
     p1 = fm.goals.p1.get(comp, fm.goals.p1_global)
-    sm = score_matrix(lh, la, fm.goals.rho)
+    sm = fm.goals.matrix(lh, la)   # kalibre skor matrisi
     j = mk.build_joint(sm, p1)
     validated = _family_validation(con)
     blend_w, blend_calibrated = _blend_weight(con)
@@ -304,6 +310,7 @@ def predict_match(con: sqlite3.Connection, fm: FittedModels, match: sqlite3.Row,
         "covered": True,
         "model": {
             "lambda_home": lh, "lambda_away": la, "rho": fm.goals.rho, "p1": p1,
+            "cal_t": fm.goals.cal_t, "cal_g": fm.goals.cal_g, "alpha": fm.goals.alpha,
             "confidence": level, "confidence_notes": notes, "as_of": fm.goals.as_of,
             "params": fm.params, "blend_weight": blend_w, "blend_calibrated": blend_calibrated,
             "family_validation": validated,
@@ -326,6 +333,7 @@ def predict_match(con: sqlite3.Connection, fm: FittedModels, match: sqlite3.Row,
                 TeamSimInput("away", away, smu[1], fm.shots.k, fm.omega, ctx_a),
                 n_sims, N_SCENARIOS, seed,
             )
+            apply_player_calibration(sim, db.meta_get(con, "player_calibration") or {})
             sim["notes"] = {"home": ctx_h.notes, "away": ctx_a.notes,
                             "lineup_source": {"home": "resmi" if ctx_h.lineup_confirmed else "tahmini",
                                               "away": "resmi" if ctx_a.lineup_confirmed else "tahmini"}}
@@ -355,10 +363,13 @@ def predict_upcoming(con: sqlite3.Connection, fm: FittedModels, days: int = 7,
         if payload is None:
             continue
         with db.tx(con):
+            # Tam yük yalnızca en son tahmin için; geçmiş kompakt günlükte (DB saatlik çalışmada şişmesin)
+            con.execute("DELETE FROM predictions WHERE match_id=?", (r["id"],))
             con.execute(
-                "INSERT OR REPLACE INTO predictions(match_id, created_at, model_version, payload) VALUES(?,?,?,?)",
+                "INSERT INTO predictions(match_id, created_at, model_version, payload) VALUES(?,?,?,?)",
                 (r["id"], payload["created_at"], fm.version, json.dumps(payload, ensure_ascii=False)),
             )
+            log_prediction(con, payload)
         done += 1
         covered += int(bool(payload.get("covered")))
         if progress and (i + 1) % 25 == 0:
@@ -367,3 +378,93 @@ def predict_upcoming(con: sqlite3.Connection, fm: FittedModels, days: int = 7,
         db.meta_set(con, "current_model_version", fm.version)
         db.meta_set(con, "current_model_as_of", fm.goals.as_of)
     return {"matches": len(rows), "predicted": done, "covered": covered}
+
+
+# ---------------------------------------------------------------- kalibrasyon ve günlük
+
+PLAYER_CAL_FIELDS = {
+    "p_sot_1": "p_sot_1", "p_sot_2": "p_sot_2", "p_shots_1": "p_shots_1", "p_shots_2": "p_shots_2",
+    "p_shots_3": "p_shots_3", "p_goal": "p_goal", "p_play": "p_play",
+}
+
+
+def platt(p: float, a: float, b: float) -> float:
+    q = min(max(p, 1e-6), 1 - 1e-6)
+    z = a + b * np.log(q / (1 - q))
+    return float(1.0 / (1.0 + np.exp(-z)))
+
+
+def apply_player_calibration(sim: dict, cal: dict) -> None:
+    """Backtest'te çapraz doğrulamayla kazanç gösteren Platt düzeltmelerini uygular; sıralama tutarlılığını korur."""
+    if not cal:
+        return
+    for side in ("home", "away"):
+        team = sim["teams"][side]
+        for pl in team["players"]:
+            for field in PLAYER_CAL_FIELDS:
+                c = cal.get(field)
+                if c and c.get("use"):
+                    pl[field] = platt(pl[field], c["a"], c["b"])
+            # Mantıksal sıralama (kalibrasyon sonrası da): olay A, B'yi gerektiriyorsa P(A) ≤ P(B)
+            pl["p_shots_1"] = min(pl["p_shots_1"], pl["p_play"])
+            pl["p_sot_1"] = min(pl["p_sot_1"], pl["p_shots_1"])
+            pl["p_goal"] = min(pl["p_goal"], pl["p_sot_1"])
+            pl["p_shots_2"] = min(pl["p_shots_2"], pl["p_shots_1"])
+            pl["p_shots_3"] = min(pl["p_shots_3"], pl["p_shots_2"])
+            pl["p_sot_2"] = min(pl["p_sot_2"], pl["p_sot_1"], pl["p_shots_2"])
+            pl["p_goal_2"] = min(pl["p_goal_2"], pl["p_goal"], pl["p_sot_2"])
+        c = cal.get("team_sot")
+        if c and c.get("use"):
+            al = team["shots_on_target"]["at_least"]
+            prev = 1.0
+            for k in sorted(al, key=int):
+                prev = min(prev, platt(al[k], c["a"], c["b"]))
+                al[k] = prev
+        team["calibrated"] = True
+
+
+def log_prediction(con: sqlite3.Connection, payload: dict) -> None:
+    from ..coupons import model_pick
+
+    if not payload.get("covered") or not payload.get("model"):
+        return
+    m = payload["model"]
+    idd = payload.get("iddaa") or {}
+    mm = idd.get("market_model") or {}
+    pk = model_pick(payload)
+    pick = None
+    if pk is not None:
+        pick = {"market_key": pk.market_key, "outcome_no": pk.outcome_no, "key": pk.key, "label": pk.label, "line": pk.line,
+                "name": pk.outcome_name, "odd": pk.odd, "p_model": pk.p_model, "p_safe": pk.p_blend, "ev": pk.ev,
+                "family": pk.family}
+    con.execute(
+        """INSERT OR REPLACE INTO prediction_log(match_id, created_at, model_version, lambda_home, lambda_away, rho, cal_t,
+               cal_g, mkt_lambda_home, mkt_lambda_away, ms_market_actual, blend_weight, iddaa_event_id, pick)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (payload["match"]["id"], payload["created_at"], payload["model_version"], m["lambda_home"], m["lambda_away"], m["rho"],
+         m.get("cal_t", 1.0), m.get("cal_g", 1.0), mm.get("lambda_home"), mm.get("lambda_away"),
+         json.dumps(mm.get("ms_market_actual")) if mm.get("ms_market_actual") else None, m.get("blend_weight"),
+         idd.get("event_id"), json.dumps(pick, ensure_ascii=False) if pick else None),
+    )
+
+
+def compact_predictions(con: sqlite3.Connection) -> int:
+    """Eski tam tahmin yüklerini günlüğe aktarır ve maç başına yalnızca son yükü tutar (idempotent)."""
+    rows = con.execute(
+        """SELECT p.match_id, p.created_at, p.payload FROM predictions p
+           WHERE p.created_at < (SELECT MAX(created_at) FROM predictions p2 WHERE p2.match_id=p.match_id)
+              OR NOT EXISTS (SELECT 1 FROM prediction_log l WHERE l.match_id=p.match_id AND l.created_at=p.created_at)"""
+    ).fetchall()
+    n = 0
+    with db.tx(con):
+        for r in rows:
+            try:
+                log_prediction(con, json.loads(r["payload"]))
+            except (ValueError, KeyError):
+                continue
+            n += 1
+        con.execute(
+            """DELETE FROM predictions WHERE created_at < (SELECT MAX(created_at) FROM predictions p2
+               WHERE p2.match_id = predictions.match_id)"""
+        )
+    return n

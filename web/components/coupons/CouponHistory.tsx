@@ -3,7 +3,10 @@ import type { CouponHistoryResponse } from "@/lib/types";
 import { EmptyState } from "../ui";
 import { SelectionLine } from "./CouponCard";
 
-const KIND: Record<string, string> = { deger: "Değer", olasilik: "Yüksek olasılık", dengeli: "Dengeli", oyuncu: "Oyuncu" };
+export const KIND: Record<string, string> = {
+  deger: "Değer", olasilik: "Yüksek olasılık", dengeli: "Dengeli", oyuncu: "Oyuncu", tekli: "Tekli",
+  sistem_2_3: "Sistem 2/3", sistem_3_4: "Sistem 3/4", surpriz: "Sürpriz",
+};
 const STATUS: Record<string, { label: string; cls: string }> = {
   open: { label: "● açık", cls: "text-ink-2" },
   won: { label: "✓ tuttu", cls: "text-good-ink" },
@@ -22,7 +25,7 @@ export default function CouponHistory({ data }: { data: CouponHistoryResponse })
   }
   return (
     <div className="flex flex-col gap-4">
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         {Object.entries(data.summary).map(([k, s]) => (
           <div key={k} className="panel p-4">
             <p className="kicker">{KIND[k] ?? k}</p>

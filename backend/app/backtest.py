@@ -19,11 +19,11 @@ from typing import Callable
 import numpy as np
 
 from . import db
-from .config import DEFAULT_SIGMA, DEFAULT_TAU, DEFAULT_XI, REFERENCE_LEAGUE
+from .config import DEFAULT_SIGMA, DEFAULT_TAU, DEFAULT_XI, MAX_GOALS, REFERENCE_LEAGUE
 from .model import markets as mk
 from .model.count_model import fit_count_model
 from .model.goals import build_count_data, fit_goal_model, load_matches, score_matrix
-from .model.pipeline import PARAMS_PATH, _fit_aux, _stat_values
+from .model.pipeline import _fit_aux, _stat_values
 
 log = logging.getLogger(__name__)
 EPS = 1e-12
@@ -96,8 +96,18 @@ def _ms_from_matrix(sm: np.ndarray) -> list[float]:
     return [float(np.tril(sm, -1).sum()), float(np.trace(sm)), float(np.triu(sm, 1).sum())]
 
 
+@dataclass
+class RawPred:
+    lh: float
+    la: float
+    rho: float
+    hg: int
+    ag: int
+
+
 def walk_forward(con: sqlite3.Connection, start: datetime, end: datetime, xi: float, sigma: float, tau: float,
-                 with_baselines: bool = True, with_corners: bool = False) -> list[Pred]:
+                 with_baselines: bool = True, with_corners: bool = False, alpha: float = 1.0, cal_t: float = 1.0,
+                 cal_g: float = 1.0, raw: list[RawPred] | None = None) -> list[Pred]:
     preds: list[Pred] = []
     all_matches = load_matches(con, _iso(end))
     corner_vals = _stat_values(con, _iso(end), "corners") if with_corners else {}
@@ -108,7 +118,7 @@ def walk_forward(con: sqlite3.Connection, start: datetime, end: datetime, xi: fl
         if not test:
             wk = nxt
             continue
-        gm, train, _ = fit_goal_model(con, wk, xi, sigma, tau)
+        gm, train, _ = fit_goal_model(con, wk, xi, sigma, tau, alpha, cal_t, cal_g)
         base = _league_base_rates(train, wk)
         simple = None
         if with_baselines:
@@ -122,7 +132,9 @@ def walk_forward(con: sqlite3.Connection, start: datetime, end: datetime, xi: fl
             r = gm.rates(m.league, m.home, m.away, m.neutral)
             if r is None or m.league not in base:
                 continue
-            sm = score_matrix(r[0], r[1], gm.rho)
+            if raw is not None:
+                raw.append(RawPred(r[0], r[1], gm.rho, m.hg, m.ag))
+            sm = gm.matrix(r[0], r[1])
             j = mk.build_joint(sm, gm.p1.get(m.league, gm.p1_global))
             probs = _probs_from_joint(j)
             sp = None
@@ -141,6 +153,51 @@ def walk_forward(con: sqlite3.Connection, start: datetime, end: datetime, xi: fl
                     preds.append(Pred(m.id, m.league, "korner", [alt, ust], 0 if tot < 9.5 else 1, [1 - c_base, c_base], None))
         wk = nxt
     return preds
+
+
+def _score_loglik(raw: list[RawPred], t: float, g: float) -> float:
+    """Kalibre skor matrisinin gerçekleşen tam skorlar üzerindeki ortalama log-olabilirliği (vektörel)."""
+    from scipy.stats import poisson
+
+    n = MAX_GOALS + 1
+    k = np.arange(n)
+    lh = np.array([r.lh for r in raw]) * g
+    la = np.array([r.la for r in raw]) * g
+    rho = np.array([r.rho for r in raw])
+    ph = poisson.pmf(k[None, :], lh[:, None])
+    pa = poisson.pmf(k[None, :], la[:, None])
+    ph[:, -1] += np.clip(1 - ph.sum(axis=1), 0, None)
+    pa[:, -1] += np.clip(1 - pa.sum(axis=1), 0, None)
+    M = ph[:, :, None] * pa[:, None, :]
+    lo = np.maximum(-1 / lh, -1 / la)
+    hi = np.minimum(1.0, 1 / (lh * la))
+    r_ = np.clip(rho, lo + 1e-9, hi - 1e-9)
+    M[:, 0, 0] *= 1 - lh * la * r_
+    M[:, 0, 1] *= 1 + lh * r_
+    M[:, 1, 0] *= 1 + la * r_
+    M[:, 1, 1] *= 1 - r_
+    M = np.clip(M / M.sum(axis=(1, 2), keepdims=True), 1e-15, 1.0) ** t
+    M = M / M.sum(axis=(1, 2), keepdims=True)
+    hg = np.minimum([r.hg for r in raw], n - 1)
+    ag = np.minimum([r.ag for r in raw], n - 1)
+    return float(np.mean(np.log(M[np.arange(len(raw)), hg, ag])))
+
+
+def fit_score_calibration(raw: list[RawPred]) -> tuple[float, float, float]:
+    from scipy.optimize import minimize
+
+    res = minimize(lambda x: -_score_loglik(raw, float(x[0]), float(x[1])), np.array([1.0, 1.0]), method="L-BFGS-B",
+                   bounds=[(0.7, 1.3), (0.85, 1.15)])
+    return float(res.x[0]), float(res.x[1]), float(-res.fun)
+
+
+def _goal_families_ll(ps: list[Pred]) -> float:
+    """MS + A/Ü + KG toplam log-loss (şut tabanlı güç ve kalibrasyon seçiminde ölçüt)."""
+    tot = 0.0
+    for fam in ("ms", "au", "kg"):
+        xs = [p for p in ps if p.fam == fam]
+        tot += logloss([p.probs for p in xs], [p.outcome for p in xs])
+    return tot
 
 
 def logloss(ps: list[list[float]], ys: list[int]) -> float:
@@ -200,21 +257,58 @@ def summarize(preds: list[Pred]) -> dict:
 
 def tune_and_evaluate(con: sqlite3.Connection, progress: Callable[[str], None]) -> dict:
     now = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Üç dilim: AYARLAMA (parametre + kalibrasyon öğrenme) | DOĞRULAMA (kalibrasyon kullanılsın mı kararı) |
+    # DEĞERLENDİRME (hiçbir seçimde kullanılmaz; yalnızca rapor ve pazar ailesi doğrulaması)
     tune_start = now - timedelta(days=420)
+    val_start = now - timedelta(days=210)
     eval_start = now - timedelta(days=150)
-    grid = [(xi, s) for xi in (0.0015, 0.0025, 0.004, 0.006) for s in (0.25, 0.35, 0.5)]
+
+    # 1) Zaman sönümü ve büzülme (yalnız goller)
+    grid = [(xi, s_) for xi in (0.0015, 0.0025, 0.004, 0.006) for s_ in (0.25, 0.35, 0.5)]
     tuning = []
-    for i, (xi, s) in enumerate(grid):
-        ps = walk_forward(con, tune_start, eval_start, xi, s, DEFAULT_TAU, with_baselines=False)
+    for i, (xi, s_) in enumerate(grid):
+        ps = walk_forward(con, tune_start, val_start, xi, s_, DEFAULT_TAU, with_baselines=False)
         ms = [p for p in ps if p.fam == "ms"]
         ll = logloss([p.probs for p in ms], [p.outcome for p in ms])
-        tuning.append({"xi": xi, "sigma": s, "ms_logloss": ll, "n": len(ms)})
-        progress(f"Ayarlama {i + 1}/{len(grid)}: xi={xi} sigma={s} MS log-loss={ll:.4f} (n={len(ms)})")
+        tuning.append({"xi": xi, "sigma": s_, "ms_logloss": ll, "n": len(ms)})
+        progress(f"Ayarlama {i + 1}/{len(grid)}: xi={xi} sigma={s_} MS log-loss={ll:.4f} (n={len(ms)})")
     best = min(tuning, key=lambda t: t["ms_logloss"])
-    params = {"xi": best["xi"], "sigma": best["sigma"], "tau": DEFAULT_TAU}
-    PARAMS_PATH.write_text(json.dumps(params, indent=2), encoding="utf-8")
-    progress(f"Seçilen parametreler: {params}. Değerlendirme dilimi çalışıyor…")
-    ev = walk_forward(con, eval_start, now, params["xi"], params["sigma"], params["tau"], with_baselines=True, with_corners=True)
+    xi, sigma = best["xi"], best["sigma"]
+
+    # 2) Şut tabanlı güç: gol / isabetli şut karışımı (α=1 yalnız gol)
+    alpha_tuning = []
+    for alpha in (1.0, 0.7, 0.5, 0.3, 0.15, 0.0):
+        ps = walk_forward(con, tune_start, val_start, xi, sigma, DEFAULT_TAU, with_baselines=False, alpha=alpha)
+        ll = _goal_families_ll(ps)
+        alpha_tuning.append({"alpha": alpha, "goal_families_logloss": ll})
+        progress(f"Şut ağırlığı α={alpha}: MS+A/Ü+KG log-loss={ll:.4f}")
+    alpha = min(alpha_tuning, key=lambda t: t["goal_families_logloss"])["alpha"]
+
+    # 3) Skor kalibrasyonu: ayarlama diliminin ham tahminlerinden öğren
+    raw: list[RawPred] = []
+    walk_forward(con, tune_start, val_start, xi, sigma, DEFAULT_TAU, with_baselines=False, alpha=alpha, raw=raw)
+    cal_t, cal_g, cal_ll = fit_score_calibration(raw)
+    base_ll = _score_loglik(raw, 1.0, 1.0)
+    progress(f"Skor kalibrasyonu (ayarlama): t={cal_t:.3f} g={cal_g:.3f} tam skor log-olabilirlik {base_ll:.4f} -> {cal_ll:.4f}")
+
+    # 4) Kalibrasyon kararı DOĞRULAMA diliminde (değerlendirme dilimi bu karara karışmaz)
+    va_raw = walk_forward(con, val_start, eval_start, xi, sigma, DEFAULT_TAU, with_baselines=False, alpha=alpha)
+    va_cal = walk_forward(con, val_start, eval_start, xi, sigma, DEFAULT_TAU, with_baselines=False, alpha=alpha,
+                          cal_t=cal_t, cal_g=cal_g)
+    ll_raw, ll_cal = _goal_families_ll(va_raw), _goal_families_ll(va_cal)
+    use_cal = ll_cal < ll_raw
+    score_cal = {"t": cal_t, "g": cal_g, "used": use_cal, "eval_ll_raw": ll_raw, "eval_ll_cal": ll_cal,
+                 "tune_score_ll_raw": base_ll, "tune_score_ll_cal": cal_ll, "decided_on": "doğrulama dilimi"}
+    progress(f"Doğrulama MS+A/Ü+KG log-loss: kalibrasyonsuz {ll_raw:.4f}, kalibre {ll_cal:.4f} -> {'kullanılıyor' if use_cal else 'kullanılmıyor'}")
+    # 5) Değerlendirme (dokunulmamış dilim): yalnızca seçilen yapılandırmayla, rapor + aile doğrulaması
+    ev = walk_forward(con, eval_start, now, xi, sigma, DEFAULT_TAU, with_baselines=True, with_corners=True, alpha=alpha,
+                      cal_t=cal_t if use_cal else 1.0, cal_g=cal_g if use_cal else 1.0)
+    params = {"xi": xi, "sigma": sigma, "tau": DEFAULT_TAU, "alpha": alpha,
+              "cal_t": cal_t if use_cal else 1.0, "cal_g": cal_g if use_cal else 1.0}
+    with db.tx(con):
+        db.meta_set(con, "model_params", params)
+    progress(f"Seçilen parametreler: {params}")
+
     summary = summarize(ev)
     by_league: dict[str, dict] = {}
     lg_groups: dict[str, list[Pred]] = defaultdict(list)
@@ -239,7 +333,6 @@ def tune_and_evaluate(con: sqlite3.Connection, progress: Callable[[str], None]) 
         validation[fam] = {"validated": ok, "ece": ece, "n": r["n"],
                            "gain": r["base_logloss"] - r["model_logloss"]}
         r["ece"] = ece
-    # Kupon pazar aileleri: 'au' ve 'kg' ailesi aynı skor matrisinden; 'iy' ailesi iy+iyms ikisini de geçmeli
     family = {
         "ms": validation.get("ms", {}),
         "au": validation.get("au", {}),
@@ -249,10 +342,13 @@ def tune_and_evaluate(con: sqlite3.Connection, progress: Callable[[str], None]) 
     }
     result = {
         "created_at": _iso(datetime.now(timezone.utc)),
-        "tune_window": [_iso(tune_start), _iso(eval_start)],
+        "tune_window": [_iso(tune_start), _iso(val_start)],
+        "validation_window": [_iso(val_start), _iso(eval_start)],
         "eval_window": [_iso(eval_start), _iso(now)],
         "params": params,
         "tuning": tuning,
+        "alpha_tuning": alpha_tuning,
+        "score_calibration": score_cal,
         "summary": summary,
         "by_league": by_league,
         "family_validation": family,
@@ -294,15 +390,39 @@ def out_of_sample_dispersion(con: sqlite3.Connection, start: datetime, end: date
     return out
 
 
-def evaluate_players(con: sqlite3.Connection, progress: Callable[[str], None], n_matches: int = 300, n_sims: int = 2000) -> dict:
-    """Oyuncu P(SoT>=1), P(şut>=1), P(gol) kalibrasyonu: değerlendirme dilimindeki maçlardan örneklem, sızıntısız."""
+def _platt_fit(v: list[tuple[float, int]]) -> tuple[float, float]:
+    from scipy.optimize import minimize
+
+    p = np.clip(np.array([x for x, _ in v]), 1e-6, 1 - 1e-6)
+    y = np.array([t for _, t in v], dtype=float)
+    z = np.log(p / (1 - p))
+
+    def nll(w: np.ndarray) -> float:
+        q = 1 / (1 + np.exp(-(w[0] + w[1] * z)))
+        q = np.clip(q, 1e-9, 1 - 1e-9)
+        return float(-np.mean(y * np.log(q) + (1 - y) * np.log(1 - q)))
+
+    res = minimize(nll, np.array([0.0, 1.0]), method="L-BFGS-B", bounds=[(-3, 3), (0.3, 3.0)])
+    return float(res.x[0]), float(res.x[1])
+
+
+def _bin_ll(v: list[tuple[float, int]], a: float = 0.0, b: float = 1.0) -> float:
+    p = np.clip(np.array([x for x, _ in v]), 1e-6, 1 - 1e-6)
+    q = 1 / (1 + np.exp(-(a + b * np.log(p / (1 - p)))))
+    q = np.clip(q, 1e-9, 1 - 1e-9)
+    y = np.array([t for _, t in v], dtype=float)
+    return float(-np.mean(y * np.log(q) + (1 - y) * np.log(1 - q)))
+
+
+def evaluate_players(con: sqlite3.Connection, progress: Callable[[str], None], n_matches: int = 400, n_sims: int = 2000) -> dict:
+    """Oyuncu ve takım şut tahminlerinin doğrulaması (sızıntısız) + çapraz doğrulamalı Platt kalibrasyonu."""
     from .model.pipeline import fit_all
     from .model.simulate import TeamSimInput, simulate_match
 
     now = datetime.now(timezone.utc)
     start = now - timedelta(days=120)
     rows = con.execute(
-        """SELECT * FROM matches WHERE completed=1 AND summary_status='ok' AND date_utc >= ? AND date_utc < ?
+        """SELECT * FROM matches WHERE completed=1 AND summary_status='ok' AND extra_time=0 AND date_utc >= ? AND date_utc < ?
            ORDER BY date_utc""",
         (_iso(start), _iso(now)),
     ).fetchall()
@@ -315,8 +435,9 @@ def evaluate_players(con: sqlite3.Connection, progress: Callable[[str], None], n
         d = _dt(r["date_utc"])
         wk = (d - timedelta(days=d.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
         by_week[_iso(wk)].append(r)
-    recs: dict[str, list[tuple[float, int]]] = defaultdict(list)
-    team_sot: list[tuple[float, int]] = []
+    # kayıt: (tahmin, gerçekleşme, kat) — kat = maç sırası paritesi (2 katlı çapraz doğrulama)
+    recs: dict[str, list[tuple[float, int, int]]] = defaultdict(list)
+    mi = 0
     for i, (wk, ms) in enumerate(sorted(by_week.items())):
         fm = fit_all(con, _dt(wk))
         if fm.shots is None:
@@ -326,9 +447,10 @@ def evaluate_players(con: sqlite3.Connection, progress: Callable[[str], None], n
             smu = fm.shots.means(m["league"], m["home_id"], m["away_id"], bool(m["neutral"]))
             if r is None or smu is None:
                 continue
-            sm = score_matrix(r[0], r[1], fm.goals.rho)
+            fold = mi % 2
+            mi += 1
             sim = simulate_match(
-                sm,
+                fm.goals.matrix(r[0], r[1]),
                 TeamSimInput("home", m["home_id"], smu[0], fm.shots.k, fm.omega, fm.players.team_context(m["home_id"])),
                 TeamSimInput("away", m["away_id"], smu[1], fm.shots.k, fm.omega, fm.players.team_context(m["away_id"])),
                 n_sims, 0, 11,
@@ -341,29 +463,51 @@ def evaluate_players(con: sqlite3.Connection, progress: Callable[[str], None], n
                 t = sim["teams"][side]
                 ts = tstats.get(t["team_id"])
                 if ts and ts["shots_on_target"] is not None:
-                    team_sot.append((t["shots_on_target"]["at_least"]["4"], int(ts["shots_on_target"] >= 4)))
+                    for k in ("3", "4", "5"):
+                        recs["team_sot"].append((t["shots_on_target"]["at_least"][k], int(ts["shots_on_target"] >= int(k)), fold))
                 for p in t["players"]:
-                    a = actual.get(p["player_id"])
-                    sot = (a["shots_on_target"] or 0) if a else 0
-                    sh = (a["shots"] or 0) if a else 0
-                    gl = (a["goals"] or 0) if a else 0
-                    recs["p_sot_1"].append((p["p_sot_1"], int(sot >= 1)))
-                    recs["p_shots_1"].append((p["p_shots_1"], int(sh >= 1)))
-                    recs["p_goal"].append((p["p_goal"], int(gl >= 1)))
-                    recs["p_play"].append((p["p_play"], int(bool(a) and (a["minutes"] or 0) > 0)))
+                    a_ = actual.get(p["player_id"])
+                    sot = (a_["shots_on_target"] or 0) if a_ else 0
+                    sh = (a_["shots"] or 0) if a_ else 0
+                    gl = (a_["goals"] or 0) if a_ else 0
+                    recs["p_sot_1"].append((p["p_sot_1"], int(sot >= 1), fold))
+                    recs["p_sot_2"].append((p["p_sot_2"], int(sot >= 2), fold))
+                    recs["p_shots_1"].append((p["p_shots_1"], int(sh >= 1), fold))
+                    recs["p_shots_2"].append((p["p_shots_2"], int(sh >= 2), fold))
+                    recs["p_shots_3"].append((p["p_shots_3"], int(sh >= 3), fold))
+                    recs["p_goal"].append((p["p_goal"], int(gl >= 1), fold))
+                    recs["p_play"].append((p["p_play"], int(bool(a_) and (a_["minutes"] or 0) > 0), fold))
         progress(f"Oyuncu doğrulaması: hafta {i + 1}/{len(by_week)}")
     out = {}
-    for k, v in list(recs.items()) + [("team_sot_4plus", team_sot)]:
-        if not v:
+    pcal: dict[str, dict] = {}
+    for k, v3 in recs.items():
+        if not v3:
             continue
+        v = [(p, y) for p, y, _ in v3]
         ps = [[1 - p, p] for p, _ in v]
         ys = [y for _, y in v]
         base_rate = float(np.mean(ys))
+        # 2 katlı çapraz doğrulama: bir katta öğren, diğerinde ölç
+        f0 = [(p, y) for p, y, f in v3 if f == 0]
+        f1 = [(p, y) for p, y, f in v3 if f == 1]
+        cv_raw = cv_cal = None
+        if len(f0) > 200 and len(f1) > 200:
+            a0, b0 = _platt_fit(f0)
+            a1, b1 = _platt_fit(f1)
+            cv_raw = (_bin_ll(f1) * len(f1) + _bin_ll(f0) * len(f0)) / len(v)
+            cv_cal = (_bin_ll(f1, a0, b0) * len(f1) + _bin_ll(f0, a1, b1) * len(f0)) / len(v)
+        a_all, b_all = _platt_fit(v) if len(v) > 200 else (0.0, 1.0)
+        use = cv_raw is not None and cv_cal is not None and cv_cal < cv_raw - 0.0005
+        pcal[k] = {"a": a_all, "b": b_all, "use": use, "cv_ll_raw": cv_raw, "cv_ll_cal": cv_cal, "n": len(v)}
+        q = [[1 - pp, pp] for pp in (1 / (1 + np.exp(-(a_all + b_all * np.log(np.clip(p, 1e-6, 1 - 1e-6) / (1 - np.clip(p, 1e-6, 1 - 1e-6)))))) for p, _ in v)] if use else ps
         out[k] = {
             "n": len(v), "model_logloss": logloss(ps, ys), "base_logloss": logloss([[1 - base_rate, base_rate]] * len(v), ys),
             "mean_pred": float(np.mean([p for p, _ in v])), "mean_obs": base_rate,
             "calibration": calibration(ps, ys),
+            "calibrated": use, "cv_ll_raw": cv_raw, "cv_ll_cal": cv_cal,
+            "calibration_after": calibration(q, ys) if use else None,
         }
     with db.tx(con):
         db.meta_set(con, "player_backtest", {"created_at": _iso(now), "window_start": _iso(start), "metrics": out})
+        db.meta_set(con, "player_calibration", pcal)
     return out

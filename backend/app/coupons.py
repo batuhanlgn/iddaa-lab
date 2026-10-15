@@ -20,6 +20,8 @@ import numpy as np
 
 from . import db
 from .config import (
+    SINGLE_MIN_ODDS, SURPRISE_MAX_EDGE, SURPRISE_MAX_ODDS, SURPRISE_MIN_EDGE, SURPRISE_MIN_EV, SURPRISE_MIN_ODDS,
+    SURPRISE_MIN_P, SYSTEM_MIN_ODDS,
     ALLOW_UNVALIDATED_VALUE_COUPONS, COUPON_MIN_PROB, MIN_SELECTION_ODDS, PICK_CS_MIN_ODDS, PICK_CS_MIN_P,
     PICK_GOALS_MIN_ODDS, PICK_GOALS_MIN_P, PICK_MS_MIN_ODDS, PICK_MS_MIN_P, PLAYER_PICK_MAX_P, PLAYER_PICK_MIN_P,
     PLAYER_PICK_MIN_START, VALUE_EV_THRESHOLD, VALUE_MAX_MODEL_MARKET_RATIO, VALUE_MAX_ODDS, VALUE_MIN_ODDS,
@@ -199,6 +201,45 @@ def combine(sels: list[Selection]) -> dict[str, Any]:
     }
 
 
+def _at_least(ps: list[float], k: int) -> float:
+    """Poisson-binom: bağımsız seçimlerde en az k tanesinin tutma olasılığı."""
+    dist = [1.0]
+    for p in ps:
+        nd = [0.0] * (len(dist) + 1)
+        for i, v in enumerate(dist):
+            nd[i] += v * (1 - p)
+            nd[i + 1] += v * p
+        dist = nd
+    return float(sum(dist[k:]))
+
+
+def combine_system(sels: list[Selection], k: int) -> dict[str, Any]:
+    """Sistem k/n: n seçimden k'lık tüm kombinasyonlar ayrı birer kupon (her biri 1 birim)."""
+    base = combine(sels)
+    n = len(sels)
+    combos = []
+    exp_return = 0.0
+    for idx in itertools.combinations(range(n), k):
+        o = float(np.prod([sels[i].odd for i in idx]))
+        pr = float(np.prod([sels[i].p_blend for i in idx]))
+        combos.append({"idx": list(idx), "odds": o, "prob": pr})
+        exp_return += o * pr
+    cost = float(len(combos))
+    has_market = all(s.has_market for s in sels)
+    base.update({
+        "total_odds": sum(c["odds"] for c in combos),       # hepsi tutarsa toplam getiri
+        "prob": _at_least([s.p_blend for s in sels], k),     # en az bir kombinasyonun tutma olasılığı
+        "ev": (exp_return / cost - 1.0) if has_market and cost else None,
+        "mbs_required": max((s.mbs for s in sels), default=1),
+        "mbs_ok": all(s.mbs <= k for s in sels),
+        "system": {"k": k, "n": n, "combos": combos, "cost": cost, "expected_return": exp_return,
+                   "min_win_odds": min(c["odds"] for c in combos) if combos else 0.0},
+    })
+    if not base["mbs_ok"]:
+        base["warnings"].append(f"MBS kuralı: {k}'lı kombinasyonlar bazı seçimlerin MBS'sini sağlamıyor")
+    return base
+
+
 def _best_per_match(cands: list[Selection], score) -> list[Selection]:
     best: dict[str, Selection] = {}
     for c in cands:
@@ -207,10 +248,25 @@ def _best_per_match(cands: list[Selection], score) -> list[Selection]:
     return sorted(best.values(), key=score, reverse=True)
 
 
+MAX_SAME_MARKET = 2  # çeşitlilik: bir kuponda aynı pazar türünden en fazla 2 seçim (ortak model hatasına karşı)
+
+
+def _mix_ok(sels: list[Selection] | tuple[Selection, ...]) -> bool:
+    counts: dict[str, int] = {}
+    for s in sels:
+        counts[s.key] = counts.get(s.key, 0) + 1
+    return all(v <= MAX_SAME_MARKET for v in counts.values())
+
+
 def _fit_mbs(ranked: list[Selection], size: int) -> list[Selection]:
-    """Sıralı adaylardan tam 'size' seçim; her seçimin MBS'si kupon boyuna sığmalı. Sağlanamazsa boş liste
-    (geçersiz/kısmi kupon üretilmez)."""
-    chosen = [s for s in ranked if s.mbs <= size][:size]
+    """Sıralı adaylardan tam 'size' seçim; her seçimin MBS'si kupon boyuna sığmalı ve aynı pazar türünden en fazla
+    MAX_SAME_MARKET seçim olmalı. Sağlanamazsa boş liste (geçersiz/kısmi kupon üretilmez)."""
+    chosen: list[Selection] = []
+    for s in ranked:
+        if len(chosen) >= size:
+            break
+        if s.mbs <= size and _mix_ok([*chosen, s]):
+            chosen.append(s)
     return chosen if len(chosen) == size else []
 
 
@@ -315,7 +371,7 @@ def generate(con: sqlite3.Connection, days: float = 3.0, archive: bool = False) 
                                 and _plausible(c)], lambda c: c.ev or 0.0)[:14]
         for size in (2, 3):
             for combo in itertools.combinations(pool, size):
-                if max(c.mbs for c in combo) > size:
+                if max(c.mbs for c in combo) > size or not _mix_ok(combo):
                     continue
                 r = combine(list(combo))
                 if r["prob"] >= 0.25 and r["ev"] is not None and r["ev"] > best_combo[0]:
@@ -328,7 +384,43 @@ def generate(con: sqlite3.Connection, days: float = 3.0, archive: bool = False) 
         **combine(best_combo[1]),
     })
 
-    # 4) Oyuncu kuponu: simülasyondan, farklı maçlardan en olası oyuncu tahminleri (adil oranla)
+    # 4) Tekli: bültendeki önerilerden MBS 1 olan, oranı ≥ 1.50 ve modelin en emin olduğu tek seçim
+    singles = sorted([c for c in hp if c.mbs <= 1 and c.odd >= SINGLE_MIN_ODDS], key=lambda c: c.p_model, reverse=True)
+    sel = singles[:1]
+    kinds.append({
+        "kind": "tekli", "title": "Günün tekli seçimi", "experimental": False,
+        "description": f"Tek maçlık kupon (MBS 1): model önerileri içinde oranı ≥ {SINGLE_MIN_ODDS:.2f} olan en emin seçim. Kesinti tek seferlik ödendiği için uzun kuponlardan çok daha sık tutar.",
+        "empty_reason": None if sel else "MBS 1 olan uygun seçim yok.",
+        **combine(sel),
+    })
+
+    # 5) Sistem kuponları: önerilerden, oranı ≥ 1.40 olan en emin seçimler; 2/3 ve 3/4
+    sys_pool = sorted([c for c in hp if c.odd >= SYSTEM_MIN_ODDS], key=lambda c: c.p_model, reverse=True)
+    for k_, n_ in ((2, 3), (3, 4)):
+        chosen = _fit_mbs([c for c in sys_pool if c.mbs <= k_], n_)
+        ok = len(chosen) == n_
+        kinds.append({
+            "kind": f"sistem_{k_}_{n_}", "title": f"Sistem {k_}/{n_}", "experimental": False,
+            "description": (f"{n_} öneriden {k_}'li tüm kombinasyonlar ({len(list(itertools.combinations(range(n_), k_)))} kupon). "
+                            f"Seçimlerin en az {k_} tanesi tutarsa kazanç var; bir seçim yatsa da kupon yanmaz."),
+            "empty_reason": None if ok else "Yeterli uygun öneri yok.",
+            **(combine_system(chosen, k_) if ok else combine([])),
+        })
+
+    # 6) Sürpriz: yüksek oranlı, modelin piyasadan belirgin daha fazla inandığı ama makul seçimler (2-3 maç)
+    sur = [c for c in cands if c.ev is not None and SURPRISE_MIN_ODDS <= c.odd <= SURPRISE_MAX_ODDS
+           and c.p_model >= SURPRISE_MIN_P and SURPRISE_MIN_EDGE * c.p_market <= c.p_model <= SURPRISE_MAX_EDGE * c.p_market
+           and c.ev >= SURPRISE_MIN_EV]
+    sel = _best_size(_best_per_match(sur, lambda c: c.ev or 0.0), (3, 2))
+    kinds.append({
+        "kind": "surpriz", "title": "Sürpriz kupon", "experimental": not blend_ok,
+        "description": (f"Oranı {SURPRISE_MIN_ODDS:.2f}–{SURPRISE_MAX_ODDS:.2f} arası, modelin piyasadan en az %{(SURPRISE_MIN_EDGE - 1) * 100:.0f} "
+                        "daha fazla inandığı seçimler. Tutma olasılığı düşüktür; küçük miktarla oynanmalı."),
+        "empty_reason": None if sel else "Koşulları sağlayan sürpriz seçim yok.",
+        **combine(sel),
+    })
+
+    # 7) Oyuncu kuponu: simülasyondan, farklı maçlardan en olası oyuncu tahminleri (adil oranla)
     ranked_players = _best_per_match(player_candidates(preds), lambda c: c.p_blend)
     sel = ranked_players[:3] if len(ranked_players) >= 3 else []
     kinds.append({
@@ -358,9 +450,10 @@ def generate(con: sqlite3.Connection, days: float = 3.0, archive: bool = False) 
                 if dup:
                     k["archived_id"] = dup["id"]  # imza birebir aynı: arşivdeki kupon gösterilenle özdeş
                     continue
+                stake = float(k["system"]["cost"]) if k.get("system") else 1.0
                 cur = con.execute(
                     "INSERT INTO coupons(created_at, kind, stake, total_odds, prob, ev, payload) VALUES(?,?,?,?,?,?,?)",
-                    (created, k["kind"], 1.0, k["total_odds"], k["prob"], k["ev"] if k["ev"] is not None else 0.0,
+                    (created, k["kind"], stake, k["total_odds"], k["prob"], k["ev"] if k["ev"] is not None else 0.0,
                      json.dumps({**k, "sig": sig}, ensure_ascii=False)),
                 )
                 k["archived_id"] = cur.lastrowid
@@ -403,7 +496,7 @@ def evaluate_custom(con: sqlite3.Connection, picks: list[dict[str, Any]]) -> dic
 
 # ---------------------------------------------------------------- sonuçlandırma
 
-def _settle_selection(con: sqlite3.Connection, s: dict[str, Any]) -> str | None:
+def settle_selection(con: sqlite3.Connection, s: dict[str, Any]) -> str | None:
     m = con.execute("SELECT * FROM matches WHERE id=?", (s["match_id"],)).fetchone()
     if m is None:
         return None
@@ -460,19 +553,31 @@ def settle(con: sqlite3.Connection) -> dict[str, int]:
     with db.tx(con):
         for r in rows:
             payload = json.loads(r["payload"])
-            results = [_settle_selection(con, s) for s in payload["selections"]]
+            results = [settle_selection(con, s) for s in payload["selections"]]
             if any(x is None for x in results):
-                if "lost" in results:
+                if "lost" in results and not payload.get("system"):
                     con.execute("UPDATE coupons SET status='lost', settled_at=? WHERE id=?", (now, r["id"]))
                     settled += 1
                 continue
             payload["selection_results"] = results
-            status = "lost" if "lost" in results else ("void" if all(x == "void" for x in results) else "won")
-            payout = 0.0
-            if status == "won":
-                payout = float(np.prod([s["odd"] for s, x in zip(payload["selections"], results) if x == "won"]))
-            if status == "void":
-                payout = 1.0
+            if payload.get("system"):
+                # her kombinasyon ayrı kupon: tümü tutarsa oran çarpımı, iade seçim 1.00 sayılır
+                total = 0.0
+                for cb in payload["system"]["combos"]:
+                    rs = [results[i] for i in cb["idx"]]
+                    if "lost" in rs:
+                        continue
+                    total += float(np.prod([payload["selections"][i]["odd"] if results[i] == "won" else 1.0 for i in cb["idx"]]))
+                cost = float(payload["system"]["cost"])
+                status = "void" if all(x == "void" for x in results) else ("won" if total > 0 else "lost")
+                payout = total / cost if cost else 0.0   # birim başına getiri (stake = kombinasyon sayısı)
+            else:
+                status = "lost" if "lost" in results else ("void" if all(x == "void" for x in results) else "won")
+                payout = 0.0
+                if status == "won":
+                    payout = float(np.prod([s["odd"] for s, x in zip(payload["selections"], results) if x == "won"]))
+                if status == "void":
+                    payout = 1.0
             payload["payout"] = payout
             con.execute("UPDATE coupons SET status=?, settled_at=?, payload=? WHERE id=?",
                         (status, now, json.dumps(payload, ensure_ascii=False), r["id"]))
@@ -491,6 +596,7 @@ def history(con: sqlite3.Connection, limit: int = 200) -> dict[str, Any]:
             "settled_at": r["settled_at"], "total_odds": r["total_odds"], "prob": r["prob"], "ev": r["ev"],
             "stake": r["stake"], "payout": p.get("payout"), "selections": p["selections"],
             "selection_results": p.get("selection_results"), "experimental": bool(p.get("experimental")),
+            "system": p.get("system"),
         })
         k = by_kind.setdefault(r["kind"], {"n": 0, "settled": 0, "won": 0, "staked": 0.0, "returned": 0.0, "expected_hits": 0.0})
         k["n"] += 1
@@ -503,3 +609,7 @@ def history(con: sqlite3.Connection, limit: int = 200) -> dict[str, Any]:
     for k in by_kind.values():
         k["roi"] = (k["returned"] - k["staked"]) / k["staked"] if k["staked"] else None
     return {"items": items, "summary": by_kind}
+
+
+# geriye dönük ad
+_settle_selection = settle_selection

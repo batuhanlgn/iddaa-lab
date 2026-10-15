@@ -128,5 +128,15 @@ PICK_CS_MIN_P = 0.70
 PICK_CS_MIN_ODDS = 1.20
 PICK_GOALS_MIN_P = 0.55
 PICK_GOALS_MIN_ODDS = 1.30
+# Tekli ve sistem kuponları
+SINGLE_MIN_ODDS = 1.50
+SYSTEM_MIN_ODDS = 1.40
+# Sürpriz kuponu: yüksek oran, modelin piyasadan belirgin daha fazla inandığı (ama makul) seçimler
+SURPRISE_MIN_ODDS = 2.50
+SURPRISE_MAX_ODDS = 6.00
+SURPRISE_MIN_P = 0.25
+SURPRISE_MIN_EDGE = 1.05      # p_model >= 1.05 * p_piyasa
+SURPRISE_MAX_EDGE = 1.60      # p_model <= 1.60 * p_piyasa (aşırı ayrışma = model hatası)
+SURPRISE_MIN_EV = 0.05
 PLAYER_PICK_MIN_START = 0.85
 MIN_SELECTION_ODDS = 1.20

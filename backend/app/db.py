@@ -166,6 +166,27 @@ CREATE TABLE IF NOT EXISTS predictions (
     PRIMARY KEY (match_id, model_version)
 );
 
+-- Tahmin geçmişi (kompakt): tam yük yalnızca son tahminde tutulur (predictions); kalibrasyon, CLV ve öneri
+-- takibi için gereken alanlar her tahmin anında buraya yazılır.
+CREATE TABLE IF NOT EXISTS prediction_log (
+    match_id TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    model_version TEXT NOT NULL,
+    lambda_home REAL NOT NULL,
+    lambda_away REAL NOT NULL,
+    rho REAL NOT NULL,
+    cal_t REAL NOT NULL DEFAULT 1.0,
+    cal_g REAL NOT NULL DEFAULT 1.0,
+    mkt_lambda_home REAL,
+    mkt_lambda_away REAL,
+    ms_market_actual TEXT,
+    blend_weight REAL,
+    iddaa_event_id INTEGER,
+    pick TEXT,
+    PRIMARY KEY (match_id, created_at)
+);
+CREATE INDEX IF NOT EXISTS ix_plog_match ON prediction_log(match_id, created_at);
+
 CREATE TABLE IF NOT EXISTS coupons (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at TEXT NOT NULL,

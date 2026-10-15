@@ -81,7 +81,7 @@ def build_count_data(
     tix = {t: i for i, t in enumerate(teams)}
     comps = sorted({m.league for m in matches})
     cix = {c: i for i, c in enumerate(comps)}
-    hi, ai, ci, ne, yh, ya, ww = [], [], [], [], [], [], []
+    hi, ai, ci, ne, yh, ya, ww, gh_, ga_ = [], [], [], [], [], [], [], [], []
     for m in matches:
         days = (as_of - m.date).total_seconds() / 86400.0
         w = float(np.exp(-xi * max(days, 0.0)))
@@ -96,11 +96,13 @@ def build_count_data(
             h, a = m.hg, m.ag
         hi.append(tix[m.home]); ai.append(tix[m.away]); ci.append(cix[m.league])
         ne.append(1.0 if m.neutral else 0.0); yh.append(h); ya.append(a); ww.append(w)
+        gh_.append(m.hg); ga_.append(m.ag)
     return CountData(
         home_idx=np.array(hi, dtype=np.int64), away_idx=np.array(ai, dtype=np.int64), comp_idx=np.array(ci, dtype=np.int64),
         neutral=np.array(ne), y_home=np.array(yh, dtype=float), y_away=np.array(ya, dtype=float), weight=np.array(ww),
         teams=teams, team_league=[tl[t] for t in teams], comps=comps,
         comp_is_cup=[bool(LEAGUE_BY_SLUG[c].is_cup) if c in LEAGUE_BY_SLUG else True for c in comps],
+        g_home=np.array(gh_, dtype=float), g_away=np.array(ga_, dtype=float),
     )
 
 
@@ -130,7 +132,9 @@ def fit_rho(data: CountData, model: CountModel) -> float:
     eh = model.mu + model.home[data.comp_idx] * (1 - data.neutral) + model.delta[data.comp_idx] + model.att[data.home_idx] - model.defn[data.away_idx]
     ea = model.mu + model.delta[data.comp_idx] + model.att[data.away_idx] - model.defn[data.home_idx]
     lh, la = np.exp(eh), np.exp(ea)
-    x, y, w = data.y_home, data.y_away, data.weight
+    x = data.g_home if data.g_home is not None else data.y_home
+    y = data.g_away if data.g_away is not None else data.y_away
+    w = data.weight
     lo, hi = rho_bounds(lh, la)
     lo, hi = max(lo + 1e-6, -0.3), min(hi - 1e-6, 0.3)
     low = (x <= 1) & (y <= 1)
@@ -141,6 +145,19 @@ def fit_rho(data: CountData, model: CountModel) -> float:
 
     res = minimize_scalar(nll, bounds=(lo, hi), method="bounded")
     return float(res.x)
+
+
+def calibrate_matrix(sm: np.ndarray, t: float) -> np.ndarray:
+    """Sıcaklık kalibrasyonu: M ∝ M^t (t<1 dağılımı yayar, t>1 sivriltir). t=1 kimlik."""
+    if abs(t - 1.0) < 1e-12:
+        return sm
+    m = np.clip(sm, 1e-15, 1.0) ** t
+    return m / m.sum()
+
+
+def score_matrix_cal(lh: float, la: float, rho: float, t: float = 1.0, g: float = 1.0) -> np.ndarray:
+    """Kalibre skor matrisi: gol seviyesi çarpanı g ve sıcaklık t (backtest ayarlama diliminde öğrenilir)."""
+    return calibrate_matrix(score_matrix(lh * g, la * g, rho), t)
 
 
 def score_matrix(lh: float, la: float, rho: float, n: int = MAX_GOALS) -> np.ndarray:
@@ -186,6 +203,12 @@ class GoalModel:
     sigma: float
     tau: float
     n_matches: int
+    alpha: float = 1.0
+    cal_t: float = 1.0
+    cal_g: float = 1.0
+
+    def matrix(self, lh: float, la: float) -> np.ndarray:
+        return score_matrix_cal(lh, la, self.rho, self.cal_t, self.cal_g)
 
     def rates(self, comp: str, home: str, away: str, neutral: bool = False) -> tuple[float, float] | None:
         lr = self.counts.log_rates(comp, home, away, neutral)
@@ -219,11 +242,54 @@ class GoalModel:
         return level, notes
 
 
-def fit_goal_model(con: sqlite3.Connection, as_of: datetime, xi: float, sigma: float, tau: float) -> tuple[GoalModel, list[MatchRecord], CountData]:
+def sot_composite(con: sqlite3.Connection, matches: list[MatchRecord], before: str, alpha: float,
+                  prior_k: float = 400.0) -> dict[str, tuple[float, float]] | None:
+    """Şut tabanlı güç için bileşik hedef: y = α·gol + (1-α)·dönüşüm_lig·isabetli_şut.
+
+    İsabetli şut, gelecekteki gol üretimini goldan daha az gürültüyle gösterir. Lig dönüşüm oranı (gol / isabetli şut)
+    yalnızca kesim öncesi maçlardan ve genel orana büzülerek hesaplanır. İstatistiği olmayan maçlarda hedef = gol.
+    """
+    if alpha >= 0.999:
+        return None
+    rows = con.execute(
+        """SELECT s.match_id, s.is_home, s.shots_on_target v FROM team_match_stats s JOIN matches m ON m.id=s.match_id
+           WHERE m.completed=1 AND m.extra_time=0 AND m.date_utc < ? AND s.shots_on_target IS NOT NULL""",
+        (before,),
+    ).fetchall()
+    sot: dict[str, dict[int, float]] = {}
+    for r in rows:
+        sot.setdefault(r["match_id"], {})[int(r["is_home"])] = float(r["v"])
+    by_id = {m.id: m for m in matches}
+    lg_g: dict[str, float] = {}
+    lg_s: dict[str, float] = {}
+    for mid, d in sot.items():
+        m = by_id.get(mid)
+        if m is None or 0 not in d or 1 not in d:
+            continue
+        lg_g[m.league] = lg_g.get(m.league, 0.0) + m.hg + m.ag
+        lg_s[m.league] = lg_s.get(m.league, 0.0) + d[1] + d[0]
+    tg, ts = sum(lg_g.values()), sum(lg_s.values())
+    glob = tg / ts if ts > 0 else 0.3
+    conv = {lg: (lg_g[lg] + prior_k * glob) / (lg_s[lg] + prior_k) for lg in lg_g}
+    out: dict[str, tuple[float, float]] = {}
+    for m in matches:
+        d = sot.get(m.id)
+        if d and 0 in d and 1 in d:
+            c = conv.get(m.league, glob)
+            out[m.id] = (alpha * m.hg + (1 - alpha) * c * d[1], alpha * m.ag + (1 - alpha) * c * d[0])
+        else:
+            out[m.id] = (float(m.hg), float(m.ag))
+    return out
+
+
+def fit_goal_model(con: sqlite3.Connection, as_of: datetime, xi: float, sigma: float, tau: float, alpha: float = 1.0,
+                   cal_t: float = 1.0, cal_g: float = 1.0) -> tuple[GoalModel, list[MatchRecord], CountData]:
     before = result_cutoff(as_of)
     matches = load_matches(con, before)
-    data = build_count_data(matches, as_of, xi)
+    values = sot_composite(con, matches, before, alpha)
+    data = build_count_data(matches, as_of, xi, values=values)
     cm = fit_count_model(data, REFERENCE_LEAGUE, sigma=sigma, tau=tau)
     rho = fit_rho(data, cm)
     p1, p1g = first_half_share(con, before)
-    return GoalModel(cm, rho, p1, p1g, before, xi, sigma, tau, len(data.weight)), matches, data
+    gm = GoalModel(cm, rho, p1, p1g, before, xi, sigma, tau, len(data.weight), alpha, cal_t, cal_g)
+    return gm, matches, data

@@ -185,8 +185,11 @@ def summaries_todo(con: sqlite3.Connection, months: int = SUMMARY_MONTHS, limit:
     return out[:limit] if limit else out
 
 
-async def ingest_summaries(con: sqlite3.Connection, progress: Progress, limit: int | None = None, batch: int = 60) -> dict[str, int]:
+async def ingest_summaries(con: sqlite3.Connection, progress: Progress, limit: int | None = None, batch: int = 60,
+                           pre_only: bool = False) -> dict[str, int]:
     todo = summaries_todo(con, limit=limit)
+    if pre_only:  # saatlik kadro işi: yalnız başlamamış maçlar (resmi ilk 11 açıklandıysa yakalanır)
+        todo = [r for r in todo if r["date_utc"] >= iso(utcnow())]
     progress(f"Maç özetleri: {len(todo)} maç kuyrukta")
     stats = {"ok": 0, "missing_players": 0, "pre": 0, "pre_lineup": 0, "error": 0}
     async with PoliteClient() as client:

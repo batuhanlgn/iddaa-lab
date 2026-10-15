@@ -34,6 +34,8 @@ class CountData:
     team_league: list[str]    # her takımın (as_of anındaki) yerel ligi veya OTHER
     comps: list[str]
     comp_is_cup: list[bool]
+    g_home: np.ndarray | None = None   # gerçek goller (hedef bileşik olsa da DC rho bunlarla fit edilir)
+    g_away: np.ndarray | None = None
 
 
 @dataclass

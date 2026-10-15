@@ -3,6 +3,7 @@
 python -m app.jobs bootstrap   # ilk kurulum: tüm geçmiş + özetler + iddaa + backtest/ayar + tahminler
 python -m app.jobs refresh     # güncelleme: yakın dönem veri + iddaa + model + tahmin + kupon sonuçlandırma
 python -m app.jobs odds        # yalnızca iddaa oranları + eşleştirme + tahminlerin oran kısmı
+python -m app.jobs lineups     # saatlik: yaklaşan maçların resmi kadroları + oranlar -> yeniden tahmin ve kupon
 python -m app.jobs backtest    # walk-forward doğrulama + hiperparametre ayarı + oyuncu doğrulaması
 """
 from __future__ import annotations
@@ -18,6 +19,7 @@ from . import coupons, db
 from .blend import calibrate_blend
 from .ingest import backfill_periods, ingest_iddaa, ingest_scoreboards, ingest_summaries, iso, repair_missing_stats, utcnow
 from .matching import match_iddaa_events
+from .tracking import update_tracking
 
 log = logging.getLogger("jobs")
 Progress = Callable[[str], None]
@@ -64,6 +66,16 @@ def _prepare(con, progress: Progress) -> None:
     """İdempotent veri hazırlığı: eksik istatistik onarımı + İY/90 dk skorları (eğitim bunlara dayanır)."""
     progress(f"Eksik istatistik onarımı: {repair_missing_stats(con)} maç")
     progress(f"Devre skorları (İY / 90 dk): {backfill_periods(con)} maç")
+    from .model.pipeline import compact_predictions
+
+    progress(f"Tahmin arşivi sıkıştırma: {compact_predictions(con)} kayıt günlüğe aktarıldı")
+
+
+def _finish_cycle(con, progress: Progress) -> None:
+    progress(f"Kupon sonuçlandırma: {coupons.settle(con)}")
+    progress(f"Öneri/CLV takibi: {update_tracking(con)}")
+    gen = coupons.generate(con, days=3, archive=True)
+    progress(f"Kuponlar üretildi: {[(k['kind'], len(k['selections'])) for k in gen['coupons']]}")
 
 
 def _iddaa_safe(con, progress: Progress) -> None:
@@ -80,7 +92,17 @@ def do_odds(con, progress: Progress) -> None:
     _iddaa_safe(con, progress)
     progress(f"Eşleştirme: {match_iddaa_events(con)}")
     _predict(con, progress)
-    progress(f"Kupon sonuçlandırma: {coupons.settle(con)}")
+    _finish_cycle(con, progress)
+
+
+def do_lineups(con, progress: Progress) -> None:
+    """Saatlik: yaklaşan maçların (36 saat) özetlerinden resmi kadrolar + güncel oranlar -> yeniden tahmin ve kupon."""
+    _prepare(con, progress)
+    asyncio.run(ingest_summaries(con, progress, pre_only=True))
+    _iddaa_safe(con, progress)
+    progress(f"Eşleştirme: {match_iddaa_events(con)}")
+    _predict(con, progress)
+    _finish_cycle(con, progress)
 
 
 def do_refresh(con, progress: Progress) -> None:
@@ -89,12 +111,10 @@ def do_refresh(con, progress: Progress) -> None:
     _prepare(con, progress)
     _iddaa_safe(con, progress)
     progress(f"Eşleştirme: {match_iddaa_events(con)}")
-    progress(f"Kupon sonuçlandırma: {coupons.settle(con)}")
     # Kalibrasyon tahminlerden ÖNCE: yeni tahminler ve kuponlar güncel ağırlıkla hesaplanır
     progress(f"Harman kalibrasyonu: {calibrate_blend(con)}")
     _predict(con, progress)
-    gen = coupons.generate(con, days=3, archive=True)
-    progress(f"Kuponlar üretildi: {[(k['kind'], len(k['selections'])) for k in gen['coupons']]}")
+    _finish_cycle(con, progress)
 
 
 def do_backtest(con, progress: Progress) -> None:
@@ -117,6 +137,7 @@ COMMANDS: dict[str, Callable[[object, Progress], None]] = {
     "bootstrap": do_bootstrap,
     "refresh": do_refresh,
     "odds": do_odds,
+    "lineups": do_lineups,
     "backtest": do_backtest,
     "ingest": lambda con, pr: (asyncio.run(ingest_scoreboards(con, pr)), asyncio.run(ingest_summaries(con, pr)),
                                asyncio.run(ingest_iddaa(con, pr))) and None,

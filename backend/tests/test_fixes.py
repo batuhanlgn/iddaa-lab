@@ -66,15 +66,21 @@ def test_missing_goal_events_do_not_become_0_0():
     assert (s.home_ft90, s.away_ft90) == (1, 0)  # uzatma yoksa nihai skor = 90 dk
 
 
-def _sel(mid: str, mbs: int) -> Selection:
-    return Selection(mid, 1, "a", "b", "L", "2026-01-01T00:00:00Z", "1:1:", "ms", "Maç Sonucu", "ms", None, 1, "1",
+def _sel(mid: str, mbs: int, key: str = "ms") -> Selection:
+    return Selection(mid, 1, "a", "b", "L", "2026-01-01T00:00:00Z", "1:1:", key, "Maç Sonucu", "ms", None, 1, "1",
                      1.5, 0.7, 0.66, 0.68, 0.02, mbs, "yüksek")
 
 
 def test_mbs_never_returns_partial_coupon():
     assert _fit_mbs([_sel("1", 3)], 3) == []
-    assert len(_fit_mbs([_sel("1", 1), _sel("2", 3), _sel("3", 2)], 3)) == 3
+    assert len(_fit_mbs([_sel("1", 1), _sel("2", 3, "au"), _sel("3", 2)], 3)) == 3
     assert _fit_mbs([_sel("1", 3), _sel("2", 3)], 2) == []
+
+
+def test_coupon_market_diversity():
+    # aynı pazar türünden en fazla 2 seçim: üçüncü MS atlanır, sıradaki farklı pazar alınır
+    picked = _fit_mbs([_sel("1", 1), _sel("2", 1), _sel("3", 1), _sel("4", 1, "kg")], 3)
+    assert [s.match_id for s in picked] == ["1", "2", "4"]
 
 
 def test_blend_validation_uses_coupon_probability():

@@ -320,6 +320,8 @@ def performance() -> dict[str, Any]:
         "backtest": db.meta_get(c, "backtest"),
         "player_backtest": db.meta_get(c, "player_backtest"),
         "blend_calibration": db.meta_get(c, "blend_calibration"),
+        "tracking": db.meta_get(c, "tracking"),
+        "player_calibration": db.meta_get(c, "player_calibration"),
         "coupons": coupons.history(c, limit=500)["summary"],
         "league_names": {lg.slug: f"{lg.country} · {lg.name}" for lg in LEAGUES},
     }

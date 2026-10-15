@@ -1,0 +1,12 @@
+Ortağın Claude, kullanıcının istediği 6 geliştirmeyi yaptı (henüz commit edilmedi; `git diff` ve yeni dosyalarla bak: backend/app/tracking.py, backend/tests/test_v2.py). Salt-okur denetçisin, Türkçe ve kısa yanıt ver. Veritabanına yazma (arka planda backtest çalışıyor).
+
+Değişiklikler:
+1) Şut tabanlı güç: model/goals.py sot_composite — hedef y = α·gol + (1-α)·dönüşüm_lig·isabetli_şut (quasi-Poisson), DC rho gerçek gollerle (CountData.g_home/g_away). α backtest'te seçiliyor (backtest.tune_and_evaluate).
+2) Kadro: jobs.do_lineups saatlik (ingest_summaries pre_only), iş akışı .github/workflows/update.yml saatlik + actions/cache ile DB.
+3) CLV/takip: backend/app/tracking.py (ilk yayınlanan öneri vs kapanış oranı, sonuç, ROI), prediction_log tablosu + compact_predictions (pipeline.py) — tam yük yalnız son tahmin.
+4) Kalibrasyon: skor matrisi sıcaklık t ve gol çarpanı g (ayarlama diliminden fit_score_calibration, değerlendirmede iyileşirse kullan), oyuncu Platt (evaluate_players 2 katlı CV, apply_player_calibration).
+5) Tekli + Sistem 2/3, 3/4 kuponları (coupons.combine_system, _at_least, settle sistem).
+6) Sürpriz kupon.
+Ayrıca model parametreleri artık DB meta 'model_params' (GitHub'da data/ klasörü kalıcı değildi).
+
+İstenen: yalnızca GERÇEK hatalar (sızıntı, matematik, sonuçlandırma, iş akışı, veri kaybı). En fazla 10 bulgu, dosya:satır + somut senaryo + kısa düzeltme. Önem sırasıyla. Yoksa "KRİTİK HATA YOK".

@@ -9,6 +9,11 @@ import { BackendError, getJSON } from "@/lib/server-api";
 import type { CouponHistoryResponse, CouponsResponse } from "@/lib/types";
 
 const FAM: Record<string, string> = { ms: "Maç sonucu", au: "Alt/Üst", kg: "KG", iy: "İlk yarı", korner: "Korner" };
+const COUPON_GROUPS: { title: string; kinds: string[] }[] = [
+  { title: "Kısa kuponlar · tutma olasılığı yüksek", kinds: ["tekli", "olasilik", "sistem_2_3", "sistem_3_4"] },
+  { title: "Değer ve sürpriz · model piyasadan farklı düşünüyor", kinds: ["deger", "dengeli", "surpriz"] },
+  { title: "Oyuncu tahminleri", kinds: ["oyuncu"] },
+];
 
 async function Generated() {
   let data: CouponsResponse;
@@ -38,11 +43,20 @@ async function Generated() {
           ))
         )}
       </div>
-      <div className="grid gap-4 md:grid-cols-2 2xl:grid-cols-4">
-        {data.coupons.map((c, i) => (
-          <CouponCard key={c.kind} c={c} delay={i * 60} />
-        ))}
-      </div>
+      {COUPON_GROUPS.map((g) => {
+        const cs = data.coupons.filter((c) => g.kinds.includes(c.kind));
+        if (cs.length === 0) return null;
+        return (
+          <div key={g.title} className="flex flex-col gap-2">
+            <p className="kicker">{g.title}</p>
+            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              {cs.map((c, i) => (
+                <CouponCard key={c.kind} c={c} delay={i * 60} />
+              ))}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }

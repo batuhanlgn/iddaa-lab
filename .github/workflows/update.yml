@@ -2,14 +2,16 @@ name: Güncelle ve yayınla
 
 on:
   schedule:
-    - cron: "7 */3 * * *"   # 3 saatte bir: veri + iddaa oranları + model + tahmin + kupon
-    - cron: "37 2 * * 1"    # pazartesi: ek olarak walk-forward backtest
+    # Saatte bir. Saat 3'ün katıysa tam güncelleme (refresh), değilse yaklaşan maçların resmi kadroları ve
+    # oranlarıyla yeniden tahmin (lineups). Pazartesi 02 UTC: ek olarak walk-forward backtest.
+    - cron: "7 * * * *"
+    - cron: "37 2 * * 1"   # haftalık backtest (ayrı zamanlama: gecikse de atlanmaz)
   workflow_dispatch:
     inputs:
       job:
         description: "Çalıştırılacak iş"
         type: choice
-        options: [refresh, odds, backtest]
+        options: [refresh, lineups, odds, backtest]
         default: refresh
 
 permissions:
@@ -52,10 +54,22 @@ jobs:
           python -m venv backend/.venv
           backend/.venv/bin/pip install -q -r backend/requirements.txt
 
-      - name: Veritabanını indir (Release)
+      # Veritabanı önce önbellekten (hızlı), yoksa Release yedeğinden
+      - name: Veritabanı önbelleği
+        id: dbcache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/iddaa_lab.sqlite3
+          key: db-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: db-
+
+      - name: Veritabanını indir (Release yedeği)
         run: |
           mkdir -p data
-          if gh release download "$DATA_TAG" --pattern "iddaa_lab.sqlite3.gz" --dir data; then
+          if [ -f data/iddaa_lab.sqlite3 ]; then
+            echo "Önbellekten geldi"
+            echo "HAVE_DB=1" >> "$GITHUB_ENV"
+          elif gh release download "$DATA_TAG" --pattern "iddaa_lab.sqlite3.gz" --dir data; then
             gunzip -f data/iddaa_lab.sqlite3.gz
             echo "HAVE_DB=1" >> "$GITHUB_ENV"
           else
@@ -66,15 +80,19 @@ jobs:
       - name: Çalıştırılacak işi seç
         id: pick
         run: |
+          H=$(date -u +%H)
           if [ "$HAVE_DB" != "1" ]; then
             echo "jobs=bootstrap" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "jobs=${{ inputs.job }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event.schedule }}" = "37 2 * * 1" ]; then
             echo "jobs=backtest refresh" >> "$GITHUB_OUTPUT"
-          else
+          elif [ $((10#$H % 3)) -eq 0 ]; then
             echo "jobs=refresh" >> "$GITHUB_OUTPUT"
+          else
+            echo "jobs=lineups" >> "$GITHUB_OUTPUT"
           fi
+          echo "Seçilen işler: $(grep '^jobs=' "$GITHUB_OUTPUT" | tail -1)"
 
       - name: Model ve tahminler
         working-directory: backend
@@ -85,10 +103,20 @@ jobs:
             echo "::endgroup::"
           done
 
-      - name: Veritabanını kaydet (Release)
+      - name: Veritabanını kapat (WAL birleştir)
         if: ${{ !cancelled() && hashFiles('data/iddaa_lab.sqlite3') != '' }}
+        run: python3 -c "import sqlite3; c=sqlite3.connect('data/iddaa_lab.sqlite3'); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()"
+
+      - name: Veritabanı önbelleğini kaydet
+        if: ${{ !cancelled() && hashFiles('data/iddaa_lab.sqlite3') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: data/iddaa_lab.sqlite3
+          key: db-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Veritabanını yedekle (Release)
+        if: ${{ !cancelled() && hashFiles('data/iddaa_lab.sqlite3') != '' && (contains(steps.pick.outputs.jobs, 'refresh') || contains(steps.pick.outputs.jobs, 'bootstrap') || contains(steps.pick.outputs.jobs, 'backtest')) }}
         run: |
-          python3 -c "import sqlite3; c=sqlite3.connect('data/iddaa_lab.sqlite3'); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()"
           gzip -kf data/iddaa_lab.sqlite3
           gh release view "$DATA_TAG" >/dev/null 2>&1 || \
             gh release create "$DATA_TAG" --title "Veri" --notes "GitHub Actions tarafından otomatik güncellenen veritabanı."

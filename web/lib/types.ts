@@ -279,8 +279,20 @@ export interface CouponCombination {
   warnings: string[];
 }
 
+export interface SystemInfo {
+  k: number;
+  n: number;
+  combos: { idx: number[]; odds: number; prob: number }[];
+  cost: number;
+  expected_return: number;
+  min_win_odds: number;
+}
+
+export type CouponKind = "deger" | "olasilik" | "dengeli" | "oyuncu" | "tekli" | "sistem_2_3" | "sistem_3_4" | "surpriz";
+
 export interface GeneratedCoupon extends CouponCombination {
-  kind: "deger" | "olasilik" | "dengeli" | "oyuncu";
+  kind: CouponKind;
+  system?: SystemInfo;
   title: string;
   description: string;
   empty_reason: string | null;
@@ -318,6 +330,7 @@ export interface CouponHistoryItem {
   selections: Selection[];
   selection_results: (string | null)[] | null;
   experimental: boolean;
+  system: SystemInfo | null;
 }
 
 export interface CouponKindSummary {
@@ -380,6 +393,8 @@ export interface Backtest {
   by_league: Record<string, { n: number; model_logloss: number; base_logloss: number }>;
   family_validation: Record<string, { validated?: boolean; ece?: number; n?: number; gain?: number }>;
   dispersion?: Record<string, number>;
+  alpha_tuning?: { alpha: number; goal_families_logloss: number }[];
+  score_calibration?: { t: number; g: number; used: boolean; eval_ll_raw: number; eval_ll_cal: number };
 }
 
 export interface PlayerMetric {
@@ -389,9 +404,43 @@ export interface PlayerMetric {
   mean_pred: number;
   mean_obs: number;
   calibration: CalibrationBin[];
+  calibrated?: boolean;
+  cv_ll_raw?: number | null;
+  cv_ll_cal?: number | null;
+}
+
+export interface TrackingGroup {
+  n: number;
+  n_clv: number;
+  clv_mean: number | null;
+  ev_vs_close_mean: number | null;
+  beat_close_pct: number | null;
+  settled: number;
+  won: number;
+  void: number;
+  hit_rate: number | null;
+  expected_hit_rate: number | null;
+  roi: number | null;
+}
+
+export interface TrackedPick {
+  match_id: string;
+  date_utc: string;
+  home: string;
+  away: string;
+  label: string;
+  line: string | null;
+  name: string;
+  odd: number;
+  p_model: number;
+  close_odd: number | null;
+  clv_odds: number | null;
+  result: string | null;
 }
 
 export interface PerformanceResponse {
+  tracking: { updated_at: string; groups: Record<string, TrackingGroup>; recent_picks: TrackedPick[]; family_labels: Record<string, string> } | null;
+  player_calibration: Record<string, { a: number; b: number; use: boolean; cv_ll_raw: number | null; cv_ll_cal: number | null; n: number }> | null;
   backtest: Backtest | null;
   player_backtest: { created_at: string; window_start: string; metrics: Record<string, PlayerMetric> } | null;
   blend_calibration: {

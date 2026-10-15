@@ -2,7 +2,9 @@ import { Suspense } from "react";
 import Calibration from "@/components/charts/Calibration";
 import ErrorPanel from "@/components/ErrorPanel";
 import { EmptyState, PageHeader, SectionTitle, SkeletonRows, Stat } from "@/components/ui";
-import { dateTime, pct, signedPct } from "@/lib/format";
+import { dateTime, marketLine, odd, pct, signedPct } from "@/lib/format";
+import { KIND } from "@/components/coupons/CouponHistory";
+import type { TrackingGroup } from "@/lib/types";
 import { BackendError, getJSON } from "@/lib/server-api";
 import type { PerformanceResponse } from "@/lib/types";
 
@@ -16,9 +18,13 @@ const FAM: Record<string, string> = {
 };
 const PLAYER: Record<string, string> = {
   p_sot_1: "Oyuncu 1+ isabetli şut",
+  p_sot_2: "Oyuncu 2+ isabetli şut",
   p_shots_1: "Oyuncu 1+ şut",
+  p_shots_2: "Oyuncu 2+ şut",
+  p_shots_3: "Oyuncu 3+ şut",
   p_goal: "Oyuncu gol",
   p_play: "Oyuncu oynar mı",
+  team_sot: "Takım 3+/4+/5+ isabetli şut",
   team_sot_4plus: "Takım 4+ isabetli şut",
 };
 
@@ -49,7 +55,11 @@ async function Perf() {
           sub="lig taban oranına göre (yüksek = iyi)"
         />
         <Stat label="Değerlendirilen maç" value={ms ? ms.n.toLocaleString("tr-TR") : "–"} sub={`${dateTime(bt.eval_window[0])} – ${dateTime(bt.eval_window[1])}`} />
-        <Stat label="Seçilen ξ / σ" value={<span className="num">{bt.params.xi} / {bt.params.sigma}</span>} sub="ayarlama diliminde seçildi" />
+        <Stat
+          label="Seçilen ξ / σ / α"
+          value={<span className="num">{bt.params.xi} / {bt.params.sigma} / {bt.params.alpha ?? 1}</span>}
+          sub={`α: takım gücünde gol ağırlığı (${bt.params.alpha != null && bt.params.alpha < 1 ? `isabetli şut payı %${Math.round((1 - bt.params.alpha) * 100)}` : "yalnız gol"}) · kalibrasyon ${bt.score_calibration?.used ? `açık (t=${bt.score_calibration.t.toFixed(2)}, g=${bt.score_calibration.g.toFixed(2)})` : "kapalı"}`}
+        />
         <Stat
           label="Model-piyasa harmanı"
           value={
@@ -68,6 +78,8 @@ async function Perf() {
           }
         />
       </section>
+
+      {d.tracking && <TrackingSection t={d.tracking} />}
 
       <section>
         <SectionTitle right={<span className="kicker">değerlendirme dilimi · sızıntısız haftalık yeniden eğitim</span>}>Pazar aileleri</SectionTitle>
@@ -146,6 +158,7 @@ async function Perf() {
                 <p className="text-sm font-semibold">{PLAYER[k] ?? k}</p>
                 <p className="num mb-2 text-xs text-ink-2">
                   log-loss {m.model_logloss.toFixed(4)} (taban {m.base_logloss.toFixed(4)}) · ort. tahmin {pct(m.mean_pred, 1)} / gerçek {pct(m.mean_obs, 1)}
+                  {m.calibrated ? " · ✓ kalibrasyon uygulanıyor" : ""}
                 </p>
                 <Calibration bins={m.calibration} label={`${PLAYER[k] ?? k} kalibrasyon`} color="var(--away)" />
               </div>
@@ -228,7 +241,7 @@ async function Perf() {
             {Object.entries(d.coupons).map(([k, s]) => (
               <div key={k} className="panel p-4">
                 <Stat
-                  label={({ deger: "Değer", olasilik: "Yüksek olasılık", dengeli: "Dengeli", oyuncu: "Oyuncu" } as Record<string, string>)[k] ?? k}
+                  label={KIND[k] ?? k}
                   value={`${s.won}/${s.settled}`}
                   sub={`beklenen ${s.expected_hits.toFixed(1)} · ROI ${s.roi == null ? "–" : signedPct(s.roi)}`}
                 />
@@ -239,6 +252,103 @@ async function Perf() {
       </section>
       <p className="text-xs text-muted">Backtest zamanı: {dateTime(bt.created_at)}</p>
     </div>
+  );
+}
+
+function TrackRow({ label, g }: { label: string; g: TrackingGroup }) {
+  const good = (v: number | null) => (v == null ? "" : v > 0 ? "text-good-ink" : v < 0 ? "text-critical-ink" : "");
+  return (
+    <tr>
+      <td className="px-4 py-1.5 font-medium">{label}</td>
+      <td className="num px-2 py-1.5 text-right text-ink-2">{g.n}</td>
+      <td className={`num px-2 py-1.5 text-right ${good(g.clv_mean)}`}>{g.clv_mean == null ? "–" : signedPct(g.clv_mean)}</td>
+      <td className="num px-2 py-1.5 text-right">{g.beat_close_pct == null ? "–" : pct(g.beat_close_pct)}</td>
+      <td className="num px-2 py-1.5 text-right text-ink-2">{g.settled}</td>
+      <td className="num px-2 py-1.5 text-right">
+        {g.hit_rate == null ? "–" : pct(g.hit_rate)} <span className="text-muted">/ {g.expected_hit_rate == null ? "–" : pct(g.expected_hit_rate)}</span>
+      </td>
+      <td className={`num px-4 py-1.5 text-right ${good(g.roi)}`}>{g.roi == null ? "–" : signedPct(g.roi)}</td>
+    </tr>
+  );
+}
+
+function TrackingSection({ t }: { t: NonNullable<PerformanceResponse["tracking"]> }) {
+  const rows: [string, TrackingGroup][] = [];
+  if (t.groups.oneri) rows.push(["Tüm model önerileri", t.groups.oneri]);
+  for (const [k, g] of Object.entries(t.groups)) {
+    if (k.startsWith("oneri:")) rows.push([`Öneri · ${t.family_labels[k.slice(6)] ?? k.slice(6)}`, g]);
+  }
+  for (const [k, g] of Object.entries(t.groups)) {
+    if (k.startsWith("kupon:")) rows.push([`Kupon · ${KIND[k.slice(6)] ?? k.slice(6)}`, g]);
+  }
+  return (
+    <section>
+      <SectionTitle right={<span className="kicker">ileriye dönük · {dateTime(t.updated_at)}</span>}>Öneri ve kupon takibi</SectionTitle>
+      {rows.length === 0 ? (
+        <EmptyState title="Henüz başlamış maç yok">Öneriler ve kupon seçimleri maç başladıkça kapanış oranıyla, bitince sonuçla karşılaştırılır.</EmptyState>
+      ) : (
+        <div className="panel overflow-x-auto">
+          <table className="w-full min-w-[760px] text-sm">
+            <thead className="text-left text-xs text-muted">
+              <tr>
+                <th className="px-4 py-2 font-medium">Grup</th>
+                <th className="px-2 py-2 text-right font-medium">Seçim</th>
+                <th className="px-2 py-2 text-right font-medium" title="Alınan oran / kapanış oranı − 1">CLV ort.</th>
+                <th className="px-2 py-2 text-right font-medium" title="Kapanış oranından yüksek alınan seçim oranı">Kapanışı yenen</th>
+                <th className="px-2 py-2 text-right font-medium">Sonuçlanan</th>
+                <th className="px-2 py-2 text-right font-medium" title="Gerçekleşen / modelin beklediği isabet">İsabet / beklenen</th>
+                <th className="px-4 py-2 text-right font-medium" title="1 birim düz bahisle">ROI</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line/60">
+              {rows.map(([label, g]) => (
+                <TrackRow key={label} label={label} g={g} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="mt-2 text-xs leading-relaxed text-muted">
+        CLV (kapanış oranına karşı değer): önerinin yayınlandığı oran, maç başlamadan önceki son orandan yüksekse piyasa sonradan
+        modelin tarafına kaymış demektir. Gerçek avantajın en hızlı göstergesidir; pozitif ortalama CLV iyi işarettir.
+      </p>
+      {t.recent_picks.length > 0 && (
+        <div className="panel mt-4 overflow-x-auto">
+          <table className="w-full min-w-[720px] text-sm">
+            <thead className="text-left text-xs text-muted">
+              <tr>
+                <th className="px-4 py-2 font-medium">Maç</th>
+                <th className="px-2 py-2 font-medium">Öneri</th>
+                <th className="px-2 py-2 text-right font-medium">Oran → kapanış</th>
+                <th className="px-2 py-2 text-right font-medium">CLV</th>
+                <th className="px-4 py-2 font-medium">Sonuç</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line/60">
+              {t.recent_picks.slice(0, 25).map((p) => (
+                <tr key={`${p.match_id}-${p.label}`}>
+                  <td className="px-4 py-1.5">
+                    <span className="num text-xs text-muted">{dateTime(p.date_utc)}</span> {p.home} – {p.away}
+                  </td>
+                  <td className="px-2 py-1.5 text-ink-2">
+                    {marketLine(p.label, p.line)}: <b className="text-ink">{p.name}</b> <span className="num text-muted">({pct(p.p_model)})</span>
+                  </td>
+                  <td className="num px-2 py-1.5 text-right">
+                    {odd(p.odd)} → {p.close_odd == null ? "–" : odd(p.close_odd)}
+                  </td>
+                  <td className={`num px-2 py-1.5 text-right ${p.clv_odds == null ? "" : p.clv_odds > 0 ? "text-good-ink" : "text-critical-ink"}`}>
+                    {p.clv_odds == null ? "–" : signedPct(p.clv_odds)}
+                  </td>
+                  <td className={`px-4 py-1.5 text-xs ${p.result === "won" ? "text-good-ink" : p.result === "lost" ? "text-critical-ink" : "text-muted"}`}>
+                    {p.result === "won" ? "✓ tuttu" : p.result === "lost" ? "✕ yattı" : p.result === "void" ? "↺ iade" : "● bekliyor"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }
 
