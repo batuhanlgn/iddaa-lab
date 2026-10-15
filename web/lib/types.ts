@@ -298,6 +298,8 @@ export interface GeneratedCoupon extends CouponCombination {
   empty_reason: string | null;
   experimental: boolean;
   archived_id?: number;
+  /** Günün kuponu: bu saatte kilitlendi, gün boyu değişmez */
+  locked_at?: string;
 }
 
 export interface CouponsResponse {

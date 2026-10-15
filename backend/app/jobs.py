@@ -69,6 +69,7 @@ def _prepare(con, progress: Progress) -> None:
     from .model.pipeline import compact_predictions
 
     progress(f"Tahmin arşivi sıkıştırma: {compact_predictions(con)} kayıt günlüğe aktarıldı")
+    progress(f"Mükerrer kupon temizliği: {coupons.dedupe_daily_coupons(con)} kayıt")
 
 
 def _finish_cycle(con, progress: Progress) -> None:

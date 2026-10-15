@@ -2,9 +2,9 @@ name: Güncelle ve yayınla
 
 on:
   schedule:
-    # 30 dakikada bir. Saat 3'ün katının ilk yarısındaki çalışma tam güncelleme (refresh), diğerleri yaklaşan
+    # 15 dakikada bir. Son tam güncellemenin üzerinden 3 saat geçtiyse tam güncelleme (refresh), diğerleri yaklaşan
     # maçların resmi kadroları ve güncel oranlarıyla yeniden tahmin (lineups). Canlı skor/oran ise tarayıcıda 20 sn'de bir.
-    - cron: "7,37 * * * *"
+    - cron: "7,22,37,52 * * * *"
     - cron: "37 2 * * 1"   # haftalık backtest (ayrı zamanlama: gecikse de atlanmaz)
   workflow_dispatch:
     inputs:
@@ -89,14 +89,16 @@ jobs:
       - name: Çalıştırılacak işi seç
         id: pick
         run: |
-          H=$(date -u +%H); M=$(date -u +%M)
+          # Tam güncelleme saate değil son başarılı tam güncellemenin yaşına göre (zincir saatleri kaydırabilir)
+          AGE=$(python3 -c "import sqlite3,datetime as d; c=sqlite3.connect('data/iddaa_lab.sqlite3'); r=c.execute(\"select max(finished_at) from job_runs where job in ('refresh','bootstrap') and status='ok'\").fetchone()[0]; print(int((d.datetime.now(d.timezone.utc)-d.datetime.fromisoformat(r.replace('Z','+00:00'))).total_seconds()) if r else 999999)" 2>/dev/null || echo 999999)
+          echo "Son tam güncelleme $AGE sn önce"
           if [ "$HAVE_DB" != "1" ]; then
             echo "jobs=bootstrap" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.job }}" != "auto" ]; then
             echo "jobs=${{ inputs.job }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event.schedule }}" = "37 2 * * 1" ]; then
             echo "jobs=backtest refresh" >> "$GITHUB_OUTPUT"
-          elif [ $((10#$H % 3)) -eq 0 ] && [ $((10#$M)) -lt 30 ]; then
+          elif [ "$AGE" -ge 10800 ]; then
             echo "jobs=refresh" >> "$GITHUB_OUTPUT"
           else
             echo "jobs=lineups" >> "$GITHUB_OUTPUT"
@@ -163,13 +165,13 @@ jobs:
         run: |
           LAST=$(gh api "repos/${{ github.repository }}/actions/runs?event=schedule&per_page=1" --jq '.workflow_runs[0].created_at // ""')
           NOW=$(date -u +%s)
-          if [ -n "$LAST" ] && [ $(( NOW - $(date -u -d "$LAST" +%s) )) -lt 3000 ]; then
+          if [ -n "$LAST" ] && [ $(( NOW - $(date -u -d "$LAST" +%s) )) -lt 1800 ]; then
             echo "Zamanlayıcı çalışıyor (son: $LAST); zincir gerekmiyor"; exit 0
           fi
           OTHERS=$(gh run list --repo "${{ github.repository }}" --workflow update.yml --limit 20 --json status,databaseId             --jq '[.[] | select(.status != "completed" and .databaseId != ${{ github.run_id }})] | length')
           if [ "$OTHERS" != "0" ]; then echo "Sırada başka çalışma var ($OTHERS); zincir başlatılmadı"; exit 0; fi
-          gh workflow run update.yml --repo "${{ github.repository }}" --ref main -f job=auto -f delay=1500
-          echo "Zamanlayıcı tetiklenmiyor (son: ${LAST:-hiç}); sonraki çalışma 25 dk sonra başlayacak"
+          gh workflow run update.yml --repo "${{ github.repository }}" --ref main -f job=auto -f delay=600
+          echo "Zamanlayıcı tetiklenmiyor (son: ${LAST:-hiç}); sonraki çalışma 10 dk sonra başlayacak (≈15 dk döngü)"
 
   deploy:
     needs: update

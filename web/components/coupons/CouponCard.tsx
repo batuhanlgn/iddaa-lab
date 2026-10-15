@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { kickoff, marketLine, odd, pct, signedPct } from "@/lib/format";
+import { dateTime, kickoff, marketLine, odd, pct, signedPct } from "@/lib/format";
 import type { CouponKind, GeneratedCoupon, Selection, SystemInfo } from "@/lib/types";
 import { EvTag } from "../ui";
 
@@ -85,6 +85,9 @@ export default function CouponCard({ c, delay = 0 }: { c: GeneratedCoupon; delay
           )}
         </div>
         <p className="text-xs leading-relaxed text-muted">{c.description}</p>
+        {c.locked_at && (
+          <p className="text-[0.68rem] font-semibold text-ink-2">Günün kuponu · {dateTime(c.locked_at)} itibarıyla sabit</p>
+        )}
       </div>
       {c.selections.length === 0 ? (
         <div className="m-4 rounded-lg border border-dashed border-line-strong px-4 py-6 text-center text-sm text-ink-2">

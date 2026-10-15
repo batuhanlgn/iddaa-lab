@@ -283,6 +283,12 @@ def _plausible(c: Selection) -> bool:
     return VALUE_MIN_ODDS <= c.odd <= VALUE_MAX_ODDS and c.p_model <= VALUE_MAX_MODEL_MARKET_RATIO * c.p_market
 
 
+def _istanbul_day_start_utc() -> datetime:
+    """İstanbul (UTC+3, yaz saati yok) gün başlangıcının UTC karşılığı."""
+    now_tr = datetime.now(timezone.utc) + timedelta(hours=3)
+    return now_tr.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(hours=3)
+
+
 def _blend_status(con: sqlite3.Connection) -> tuple[bool, str]:
     b = db.meta_get(con, "blend_calibration") or {}
     if isinstance(b, dict) and b.get("validated"):
@@ -433,30 +439,31 @@ def generate(con: sqlite3.Connection, days: float = 3.0, archive: bool = False) 
     })
 
     created = _iso(datetime.now(timezone.utc))
-    if archive:
+    # "Günün kuponu": her tür için İstanbul gününde ilk oluşturulan (boş olmayan) kupon kilitlenir ve gün boyu
+    # gösterilir; oranlar/model her güncellemede biraz değişse de kupon değişmez, geçmişe günde tür başına tek kayıt düşer.
+    day_start = _istanbul_day_start_utc()
+    for i, k in enumerate(kinds):
+        locked = con.execute(
+            "SELECT id, created_at, payload FROM coupons WHERE kind=? AND created_at >= ? ORDER BY created_at LIMIT 1",
+            (k["kind"], _iso(day_start)),
+        ).fetchone()
+        if locked is not None:
+            stored = json.loads(locked["payload"])
+            stored.pop("sig", None)
+            kinds[i] = {**stored, "archived_id": locked["id"], "locked_at": locked["created_at"]}
+            continue
+        if not archive or not k["selections"] or not k["mbs_ok"]:
+            continue
+        sig = sorted((s_["match_id"], s_["market_key"], s_["outcome_no"]) for s_ in k["selections"])
+        stake = float(k["system"]["cost"]) if k.get("system") else 1.0
         with db.tx(con):
-            for k in kinds:
-                if not k["selections"] or not k["mbs_ok"]:
-                    continue
-                # İmza oran, olasılık ve model sürümünü içerir: herhangi biri değişirse yeni (ayrı izlenen) bir kupondur
-                sig = sorted(
-                    (s["match_id"], s["market_key"], s["outcome_no"], repr(float(s["odd"])), repr(float(s["p_blend"])), s["model_version"])
-                    for s in k["selections"]
-                )
-                dup = con.execute(
-                    "SELECT id FROM coupons WHERE kind=? AND created_at >= ? AND payload LIKE ?",
-                    (k["kind"], _iso(datetime.now(timezone.utc) - timedelta(hours=20)), f'%"sig": {json.dumps(sig)}%'),
-                ).fetchone()
-                if dup:
-                    k["archived_id"] = dup["id"]  # imza birebir aynı: arşivdeki kupon gösterilenle özdeş
-                    continue
-                stake = float(k["system"]["cost"]) if k.get("system") else 1.0
-                cur = con.execute(
-                    "INSERT INTO coupons(created_at, kind, stake, total_odds, prob, ev, payload) VALUES(?,?,?,?,?,?,?)",
-                    (created, k["kind"], stake, k["total_odds"], k["prob"], k["ev"] if k["ev"] is not None else 0.0,
-                     json.dumps({**k, "sig": sig}, ensure_ascii=False)),
-                )
-                k["archived_id"] = cur.lastrowid
+            cur = con.execute(
+                "INSERT INTO coupons(created_at, kind, stake, total_odds, prob, ev, payload) VALUES(?,?,?,?,?,?,?)",
+                (created, k["kind"], stake, k["total_odds"], k["prob"], k["ev"] if k["ev"] is not None else 0.0,
+                 json.dumps({**k, "sig": sig}, ensure_ascii=False)),
+            )
+        k["archived_id"] = cur.lastrowid
+        k["locked_at"] = created
     return {
         "created_at": created,
         "days": days,
@@ -609,6 +616,23 @@ def history(con: sqlite3.Connection, limit: int = 200) -> dict[str, Any]:
     for k in by_kind.values():
         k["roi"] = (k["returned"] - k["staked"]) / k["staked"] if k["staked"] else None
     return {"items": items, "summary": by_kind}
+
+
+def dedupe_daily_coupons(con: sqlite3.Connection) -> int:
+    """Eski sürümden kalan mükerrer kayıtlar: her tür için İstanbul gününün yalnızca ilk kuponu kalır (idempotent)."""
+    rows = con.execute("SELECT id, kind, created_at, status FROM coupons ORDER BY created_at").fetchall()
+    seen: set[tuple[str, str]] = set()
+    drop: list[int] = []
+    for r in rows:
+        day = (datetime.fromisoformat(r["created_at"].replace("Z", "+00:00")) + timedelta(hours=3)).strftime("%Y-%m-%d")
+        key = (r["kind"], day)
+        if key in seen and r["status"] == "open":
+            drop.append(int(r["id"]))
+        seen.add(key)
+    if drop:
+        with db.tx(con):
+            con.executemany("DELETE FROM coupons WHERE id=?", [(i,) for i in drop])
+    return len(drop)
 
 
 # geriye dönük ad
