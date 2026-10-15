@@ -225,6 +225,7 @@ export interface MatchDetail {
     blend_weight: number;
     blend_calibrated: boolean;
     family_validation: Record<string, boolean>;
+    lineup_adj?: { beta: number; home: number; away: number; home_ratio: number | null; away_ratio: number | null };
   };
   score_matrix?: { size: number; p: number[][]; other: number };
   top_scores?: { home: number; away: number; p: number }[];

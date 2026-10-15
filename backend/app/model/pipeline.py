@@ -21,7 +21,7 @@ from . import markets as mk
 from .count_model import CountModel, fit_count_model, nb_dispersion
 from .goals import GoalModel, MatchRecord, build_count_data, fit_goal_model, score_matrix
 from .market_fit import MarketTarget, blend_matrix, fit_market_matrix, ms_probs
-from .players import PlayerStore, own_goal_rate
+from .players import PlayerStore, lineup_factor, own_goal_rate
 from .simulate import TeamSimInput, simulate_match
 
 log = logging.getLogger(__name__)
@@ -278,6 +278,18 @@ def predict_match(con: sqlite3.Connection, fm: FittedModels, match: sqlite3.Row,
         base["coverage_note"] = "Takımlardan en az biri için geçmiş maç verisi yok"
         return base
     lh, la = rates
+    # Resmi ilk 11 açıklandıysa takımın beklenen golü kadronun hücum gücüne göre ayarlanır (β backtest'ten)
+    conf_h = _confirmed_lineup(con, match["id"], home)
+    conf_a = _confirmed_lineup(con, match["id"], away)
+    lineup_adj: dict[str, Any] = {"beta": 0.0, "home": 1.0, "away": 1.0, "home_ratio": None, "away_ratio": None}
+    beta = float((db.meta_get(con, "lineup_beta") or {}).get("beta", 0.0))
+    if beta > 0:
+        lineup_adj["beta"] = beta
+        if conf_h:
+            lineup_adj["home"], lineup_adj["home_ratio"] = lineup_factor(fm.players, home, conf_h, beta)
+        if conf_a:
+            lineup_adj["away"], lineup_adj["away_ratio"] = lineup_factor(fm.players, away, conf_a, beta)
+        lh, la = lh * lineup_adj["home"], la * lineup_adj["away"]
     level, notes = fm.goals.confidence(comp, home, away)
     p1 = fm.goals.p1.get(comp, fm.goals.p1_global)
     sm = fm.goals.matrix(lh, la)   # kalibre skor matrisi
@@ -310,7 +322,7 @@ def predict_match(con: sqlite3.Connection, fm: FittedModels, match: sqlite3.Row,
         "covered": True,
         "model": {
             "lambda_home": lh, "lambda_away": la, "rho": fm.goals.rho, "p1": p1,
-            "cal_t": fm.goals.cal_t, "cal_g": fm.goals.cal_g, "alpha": fm.goals.alpha,
+            "cal_t": fm.goals.cal_t, "cal_g": fm.goals.cal_g, "alpha": fm.goals.alpha, "lineup_adj": lineup_adj,
             "confidence": level, "confidence_notes": notes, "as_of": fm.goals.as_of,
             "params": fm.params, "blend_weight": blend_w, "blend_calibrated": blend_calibrated,
             "family_validation": validated,
@@ -324,8 +336,8 @@ def predict_match(con: sqlite3.Connection, fm: FittedModels, match: sqlite3.Row,
     if with_sim and fm.shots is not None:
         smu = fm.shots.means(comp, home, away, neutral)
         if smu:
-            ctx_h = fm.players.team_context(home, _confirmed_lineup(con, match["id"], home))
-            ctx_a = fm.players.team_context(away, _confirmed_lineup(con, match["id"], away))
+            ctx_h = fm.players.team_context(home, conf_h)
+            ctx_a = fm.players.team_context(away, conf_a)
             seed = int(hashlib.sha1(match["id"].encode()).hexdigest()[:8], 16)
             sim = simulate_match(
                 sm,

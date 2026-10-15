@@ -252,3 +252,48 @@ def own_goal_rate(con: sqlite3.Connection, before: str) -> float:
     ).fetchone()
     nm = row["nm"] or 0
     return float(row["og"]) / (2 * nm) if nm > 50 else 0.035
+
+
+# ---------------------------------------------------------------- kadro gücü (resmi 11 -> takım beklenen golü)
+
+_POS_START_MIN = {"G": 89.0, "D": 84.0, "M": 77.0, "F": 74.0}
+LINEUP_ADJ_MIN = 0.85
+LINEUP_ADJ_MAX = 1.15
+
+
+def _start_minutes(e: LineupEntry) -> float:
+    return float(np.mean(e.start_exit)) if len(e.start_exit) >= 3 else _POS_START_MIN.get(e.pos_group, 78.0)
+
+
+def _sub_minutes(e: LineupEntry) -> float:
+    return float(np.mean([90 - x for x in e.sub_entry])) if len(e.sub_entry) >= 3 else 20.0
+
+
+def attack_index(ctx: TeamPlayerContext) -> float:
+    """Kadronun beklenen gol katkısı: Σ beklenen dakika/90 × şut/90 × isabet × dönüşüm (oyuncu oranlarından)."""
+    tot = 0.0
+    for e in ctx.lineup:
+        r = ctx.rates.get(e.player_id)
+        if r is None:
+            continue
+        if ctx.lineup_confirmed:
+            if e.confirmed_starter is True:
+                em = _start_minutes(e)
+            elif e.confirmed_starter is False:
+                em = max(e.sub_prob, 0.3) * _sub_minutes(e)
+            else:
+                em = 0.0  # kadroda yok
+        else:
+            em = e.start_prob * _start_minutes(e) + (1 - e.start_prob) * e.sub_prob * _sub_minutes(e)
+        tot += em / 90.0 * r.shots_p90 * r.acc * r.conv
+    return tot
+
+
+def lineup_factor(store: "PlayerStore", team_id: str, confirmed: dict[str, bool], beta: float) -> tuple[float, float]:
+    """(çarpan, ham oran): resmi kadronun hücum gücü / olağan (tahmini) kadronun hücum gücü, üssü beta, sınırlı."""
+    usual = attack_index(store.team_context(team_id))
+    conf = attack_index(store.team_context(team_id, confirmed))
+    if usual <= 0 or conf <= 0:
+        return 1.0, 1.0
+    ratio = conf / usual
+    return float(np.clip(ratio**beta, LINEUP_ADJ_MIN, LINEUP_ADJ_MAX)), float(ratio)

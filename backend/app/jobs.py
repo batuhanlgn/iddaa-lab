@@ -132,6 +132,9 @@ def do_backtest(con, progress: Progress) -> None:
     res = tune_and_evaluate(con, progress)
     progress(f"Backtest: params={res['params']} aileler={ {k: v.get('validated') for k, v in res['family_validation'].items()} }")
     evaluate_players(con, progress)
+    from .backtest import tune_lineup_beta
+
+    tune_lineup_beta(con, progress)
 
 
 def do_bootstrap(con, progress: Progress) -> None:
@@ -146,6 +149,7 @@ COMMANDS: dict[str, Callable[[object, Progress], None]] = {
     "refresh": do_refresh,
     "odds": do_odds,
     "lineups": do_lineups,
+    "lineup_beta": lambda con, pr: __import__("app.backtest", fromlist=["tune_lineup_beta"]).tune_lineup_beta(con, pr) and None,
     "backtest": do_backtest,
     "ingest": lambda con, pr: (asyncio.run(ingest_scoreboards(con, pr)), asyncio.run(ingest_summaries(con, pr)),
                                asyncio.run(ingest_iddaa(con, pr))) and None,

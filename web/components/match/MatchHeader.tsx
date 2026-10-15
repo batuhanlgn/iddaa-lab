@@ -49,6 +49,16 @@ export default function MatchHeader({ d }: { d: MatchDetail }) {
             Kadro: {m.lineup_confirmed ? "resmi kadro açıklandı" : "geçmiş maçlardan tahmini"}
           </span>
           {d.iddaa && <span className="rounded-full border border-line px-2 py-0.5 text-ink-2">iddaa MBS {d.iddaa.mbs ?? "–"}</span>}
+          {model?.lineup_adj && model.lineup_adj.beta > 0 && (["home", "away"] as const).map((side) => {
+            const f = model.lineup_adj![side];
+            if (Math.abs(f - 1) < 0.005) return null;
+            return (
+              <span key={side} className={`rounded-full border px-2 py-0.5 ${f < 1 ? "border-critical/40 text-critical-ink" : "border-good/40 text-good-ink"}`}
+                title="Resmi ilk 11'in hücum gücü, takımın olağan kadrosuna göre">
+                Kadro etkisi · {m[side].short_name ?? m[side].name}: gol beklentisi {f > 1 ? "+" : ""}{((f - 1) * 100).toFixed(0)}%
+              </span>
+            );
+          })}
           {model?.confidence_notes.map((n) => (
             <span key={n} className="rounded-full border border-warn/30 px-2 py-0.5 text-warn">
               {n}

@@ -511,3 +511,89 @@ def evaluate_players(con: sqlite3.Connection, progress: Callable[[str], None], n
         db.meta_set(con, "player_backtest", {"created_at": _iso(now), "window_start": _iso(start), "metrics": out})
         db.meta_set(con, "player_calibration", pcal)
     return out
+
+
+def tune_lineup_beta(con: sqlite3.Connection, progress: Callable[[str], None]) -> dict:
+    """Resmi kadro ayarının gücü β: geçmiş maçların GERÇEK ilk 11'leri ile (maç öncesi açıklanmış gibi).
+
+    β doğrulama diliminde seçilir; değerlendirme dilimi yalnızca rapor içindir. β=0 ayarın kapalı olmasıdır.
+    """
+    from .model.goals import score_matrix_cal
+    from .model.pipeline import load_params
+    from .model.players import PlayerStore, attack_index
+
+    params = load_params(con)
+    now = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    val_start, eval_start = now - timedelta(days=210), now - timedelta(days=150)
+    all_matches = {m.id: m for m in load_matches(con, _iso(now))}
+    recs: dict[str, list[tuple]] = {"val": [], "eval": []}
+    wk = val_start
+    while wk < now:
+        nxt = min(wk + timedelta(days=7), now)
+        rows = con.execute(
+            """SELECT id FROM matches WHERE completed=1 AND summary_status='ok' AND extra_time=0
+               AND date_utc >= ? AND date_utc < ?""",
+            (_iso(wk), _iso(nxt)),
+        ).fetchall()
+        ids = [r["id"] for r in rows if r["id"] in all_matches]
+        if ids:
+            gm, _, _ = fit_goal_model(con, wk, params["xi"], params["sigma"], params["tau"], params.get("alpha", 1.0),
+                                      params.get("cal_t", 1.0), params.get("cal_g", 1.0))
+            ps = PlayerStore(con, wk)
+            for mid in ids:
+                m = all_matches[mid]
+                r = gm.rates(m.league, m.home, m.away, m.neutral)
+                if r is None:
+                    continue
+                ratios = []
+                for team in (m.home, m.away):
+                    lineup = {x["player_id"]: bool(x["starter"]) for x in con.execute(
+                        "SELECT player_id, starter FROM player_match WHERE match_id=? AND team_id=?", (mid, team))}
+                    if sum(lineup.values()) < 11 or len(ps.by_team_match.get(team, {})) < 3:
+                        ratios.append(None)
+                        continue
+                    usual = attack_index(ps.team_context(team))
+                    conf = attack_index(ps.team_context(team, lineup))
+                    ratios.append(conf / usual if usual > 0 and conf > 0 else None)
+                if ratios[0] is None and ratios[1] is None:
+                    continue
+                recs["val" if wk < eval_start else "eval"].append(
+                    (r[0], r[1], gm.rho, gm.cal_t, gm.cal_g, ratios[0] or 1.0, ratios[1] or 1.0, m.hg, m.ag))
+        progress(f"Kadro ayarı doğrulaması: {_iso(wk)[:10]} haftası")
+        wk = nxt
+
+    def ll(rs: list[tuple], beta: float) -> float:
+        tot = 0.0
+        for lh, la, rho, t, g, rh, ra, hg, ag in rs:
+            fh = float(np.clip(rh**beta, 0.85, 1.15))
+            fa = float(np.clip(ra**beta, 0.85, 1.15))
+            sm = score_matrix_cal(lh * fh, la * fa, rho, t, g)
+            n = sm.shape[0] - 1
+            res = 0 if hg > ag else 1 if hg == ag else 2
+            ms = [float(np.tril(sm, -1).sum()), float(np.trace(sm)), float(np.triu(sm, 1).sum())]
+            k = np.arange(n + 1)
+            tot_goals = k[:, None] + k[None, :]
+            p_over = float(sm[tot_goals > 2.5].sum())
+            p_kg = float(sm[1:, 1:].sum())
+            tot -= np.log(max(ms[res], 1e-12))
+            tot -= np.log(max(p_over if hg + ag > 2.5 else 1 - p_over, 1e-12))
+            tot -= np.log(max(p_kg if (hg > 0 and ag > 0) else 1 - p_kg, 1e-12))
+        return tot / max(len(rs), 1)
+
+    grid = [0.0, 0.25, 0.5, 0.75, 1.0]
+    val_curve = {b: ll(recs["val"], b) for b in grid}
+    beta = min(val_curve, key=lambda b: val_curve[b])
+    res = {
+        "beta": beta, "n_val": len(recs["val"]), "n_eval": len(recs["eval"]),
+        "val_curve": {str(b): v for b, v in val_curve.items()},
+        "eval_ll_off": ll(recs["eval"], 0.0), "eval_ll_chosen": ll(recs["eval"], beta),
+        "created_at": _iso(datetime.now(timezone.utc)),
+    }
+    if len(recs["val"]) < 200:
+        res["beta"] = 0.0
+        res["note"] = "yetersiz doğrulama örneği"
+    with db.tx(con):
+        db.meta_set(con, "lineup_beta", res)
+    progress(f"Kadro ayarı: β={res['beta']} (doğrulama n={res['n_val']}), değerlendirme log-loss kapalı "
+             f"{res['eval_ll_off']:.4f} -> seçilen {res['eval_ll_chosen']:.4f}")
+    return res
