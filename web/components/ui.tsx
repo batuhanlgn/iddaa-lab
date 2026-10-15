@@ -17,7 +17,7 @@ export function Crest({ team, size = 28 }: { team: Pick<Team, "name" | "logo">; 
   return (
     // ESPN logo CDN'i; next/image optimizasyonu gereksiz (küçük PNG'ler)
     // eslint-disable-next-line @next/next/no-img-element
-    <img src={team.logo} alt="" width={size} height={size} loading="lazy" className="shrink-0 object-contain" style={{ width: size, height: size }} />
+    <img src={team.logo} alt="" width={size} height={size} loading="lazy" referrerPolicy="no-referrer" className="shrink-0 object-contain" style={{ width: size, height: size }} />
   );
 }
 

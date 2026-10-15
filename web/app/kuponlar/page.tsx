@@ -25,7 +25,7 @@ async function Generated() {
           Üretim: {dateTime(data.created_at)} · {data.n_matches_considered} maç tarandı · {data.n_candidates} aday seçim
         </span>
         <span className={data.blend_validated ? "text-good-ink" : "text-warn"}>
-          · Harman {data.blend_validated ? "✓ ileriye dönük doğrulandı" : "henüz doğrulanmadı (değer kuponları kapalı)"}
+          · Harman {data.blend_validated ? "✓ ileriye dönük doğrulandı" : "henüz doğrulanmadı (değer kuponları deneysel)"}
         </span>
         <span className="text-muted">· Kupona açık pazar aileleri:</span>
         {fams.length === 0 ? (
