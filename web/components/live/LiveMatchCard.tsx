@@ -86,7 +86,14 @@ export default function LiveMatchCard({ item, espn, il }: { item: LiveBaseItem; 
     <article className="panel flex flex-col gap-3 p-4">
       <div className="flex items-center justify-between gap-2 text-xs text-muted">
         <span className="truncate">{item.country} · {item.league_name}</span>
-        {statusBadge(espn, item)}
+        <span className="flex items-center gap-1.5">
+          {lowConf && (
+            <span className="rounded border border-critical/40 px-1.5 py-0.5 text-[0.62rem] text-critical-ink" title="Ligler arası ya da az verili maç: model ile piyasa arasındaki farklar güvenilir değil">
+              düşük güven
+            </span>
+          )}
+          {statusBadge(espn, item)}
+        </span>
       </div>
 
       <Link href={`/mac/${item.id}`} className="grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-1.5 hover:opacity-90">
@@ -156,7 +163,7 @@ export default function LiveMatchCard({ item, espn, il }: { item: LiveBaseItem; 
         <div className="overflow-hidden rounded-lg border border-line">
           <p className="flex items-center justify-between border-b border-line bg-surface-2 px-3 py-1.5 text-[0.68rem] text-muted">
             <span className="font-semibold uppercase tracking-wider">iddaa canlı</span>
-            <span>oran · model · EV</span>
+            <span>{lowConf ? "düşük güven: değer işaretlenmez" : "oran · model · EV"}</span>
           </p>
           <table className="w-full text-xs">
             <tbody className="divide-y divide-line/60">
@@ -168,10 +175,10 @@ export default function LiveMatchCard({ item, espn, il }: { item: LiveBaseItem; 
                     const value = ev != null && o.p != null && ev >= VALUE_EV && o.p >= VALUE_MIN_P && !lowConf;
                     return (
                       <td key={o.name} className={`px-1.5 py-1.5 text-right ${value ? "bg-good/10" : ""}`}>
-                        <div className="num font-semibold">
+                        <div className="num whitespace-nowrap font-semibold">
                           {OUT[o.name] ?? o.name} {odd(o.odd)}
                         </div>
-                        <div className={`num text-[0.62rem] ${value ? "text-good-ink" : "text-muted"}`}>
+                        <div className={`num whitespace-nowrap text-[0.62rem] ${value ? "text-good-ink" : "text-muted"}`}>
                           {pct(o.p)}{ev != null ? ` · ${signedPct(ev, 0)}` : ""}{value ? " ▲" : ""}
                         </div>
                       </td>
