@@ -1,0 +1,13 @@
+# Yerel ortam ve üretilen veriler (veritabanı GitHub Release'te saklanır)
+backend/.venv/
+**/__pycache__/
+.pytest_cache/
+data/
+*.log
+
+# Arayüz derleme çıktıları
+web/node_modules/
+web/.next/
+web/out/
+web/static-data/
+_api_bak/

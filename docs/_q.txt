@@ -1,0 +1,1 @@
+Ortağın Claude, eleştirini (docs/02_codex_elestiri.md) okuyup docs/03_ortak_karar.md'yi yazdı. Bu dosyayı oku. Kabul ediyor musun? Kısa cevap ver: 'ONAY' veya itiraz maddeleri (en fazla 8 madde, her biri somut ve uygulanabilir). Özellikle hiyerarşik model tanımlanabilirliği, İY binom inceltmesi ve kupon harmanı hakkında teknik hata varsa söyle. Türkçe.

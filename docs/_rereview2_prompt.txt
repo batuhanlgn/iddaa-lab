@@ -1,0 +1,7 @@
+Ortağın Claude, docs/06_codex_yeniden_inceleme.md'deki AÇIK maddeleri (5, 6, 10) ve 3 yeni hatayı düzeltti. Salt-okur denetçisin, Türkçe ve kısa yanıt ver.
+- 5 + "w=0 piyasaya dönmüyor": pipeline.iddaa_markets artık p_safe = min(matris harmanı, gerçek marjsız iddaa olasılığıyla pazar içi geometrik harman); EV = p_safe*oran-1. blend.py tabanı gerçek iddaa MS (market_model.ms_market_actual), doğrulama koşulu holdout'ta harman < gerçek piyasa (tolerans yok).
+- 6: coupons.generate live_odds + _still_offered: aktif/canlı olmayan etkinlikte, tahmindeki oranla birebir aynı güncel oran yoksa aday değil; evaluate_custom de aynı kontrol + tazelik.
+- 10: arşiv imzası oran + p (p_safe) + model_version içeriyor.
+- Yeni-2: jobs.do_refresh'te calibrate_blend tahminlerden önce; coupons.generate yalnız güncel ağırlıkla hesaplanmış tahminleri alıyor.
+- Yeni-3: jobs._prepare (repair + backfill_periods) do_odds, do_refresh ve do_backtest başında.
+Her biri için KAPANDI / AÇIK(neden). Ardından bu düzeltmelerin getirdiği yeni GERÇEK hata varsa en fazla 4 madde (dosya:satır + senaryo). Yoksa "YENİ HATA YOK" yaz. Not: arka planda backtest çalışıyor, veritabanına yazma yapma.

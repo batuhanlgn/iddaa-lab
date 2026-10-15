@@ -1,0 +1,10 @@
+Ortağın Claude, docs/03_ortak_karar.md ve docs/04_codex_onay.md'deki kararlara göre sistemi yazdı. Sen salt-okur denetçisin. Türkçe yanıt ver.
+
+İncele (dosyaları kendin oku):
+- backend/app/model/count_model.py, goals.py, markets.py, players.py, simulate.py, pipeline.py
+- backend/app/backtest.py, blend.py, coupons.py, matching.py, ingest.py, sources/espn.py, sources/iddaa.py, api.py
+- web/app/api/backend/[...path]/route.ts, web/lib/server-api.ts
+
+Yalnızca GERÇEK hataları raporla (doğruluk, veri sızıntısı, matematik hatası, ortak kararla çelişki, güvenlik). Stil önerisi istemiyorum.
+Her bulgu için: dosya:satır, sorun, somut başarısızlık senaryosu, önerilen düzeltme (kısa). Önem sırasına göre en fazla 12 bulgu.
+Emin olmadıklarını "ŞÜPHELİ" diye işaretle. Sonunda "GENEL DEĞERLENDİRME" (3-4 cümle).

@@ -1,0 +1,16 @@
+Ortağın Claude, senin docs/05_codex_kod_inceleme.md'deki 12 bulgunu düzeltti. Salt-okur denetçisin, Türkçe yanıt ver.
+Yapılanlar (dosyaları kendin oku ve doğrula):
+1 CSRF: web/app/api/backend/[...path]/route.ts — POST için aynı yerel Origin + Sec-Fetch-Site + application/json; GET izin listesi yalnız status. Kupon arşivleme artık GET /api/coupons'ta değil, yalnız jobs (refresh) içinde (coupons.generate archive=True).
+2 Uzatma: sources/espn.py parse_summary header linescores'tan İY ve 90 dk skoru (ft90_*), extra_time bayrağı; ingest.backfill_periods; goals.load_matches ft90 kullanır; coupons._settle_selection ft90 kullanır.
+3 Zaman sızıntısı: goals.result_cutoff (as_of - 3 saat) tüm eğitim yüklemelerinde; players.PlayerStore aynı kesim + extra_time=0.
+4 NB k: backtest.out_of_sample_dispersion artık ayarlama diliminde (değerlendirme öncesi) hesaplanıp aux_dispersion'a yazılıyor.
+5 Harman: blend.py zaman sıralı %70/%30 ayrım, holdout'ta piyasadan kötü değilse ve n>=200 ise validated; coupons değer/dengeli yalnız validated iken.
+6 Bayat oran: iddaa_events.active; bültende olmayan/canlı etkinliklerin odds_current kayıtları siliniyor; pipeline active=1 ve is_live=0 şartı; kuponlarda oranlar 3 saatten eski olamaz.
+7 MBS: coupons._fit_mbs tam boyut sağlanamazsa boş; mbs_ok olmayan arşivlenmez.
+8 İY: header linescores yoksa gol olayları ancak nihai skorla birebir tutarlıysa kullanılıyor; aksi NULL.
+9 Tutarlılık: model/market_fit.py — iddaa ana pazarlarına KL ile piyasa skor matrisi uydurulur, harman skor matrisi düzeyinde (M ∝ Mm^w Mq^(1-w)); tüm pazarlar tek matristen.
+10 Arşiv imzası oranları içeriyor.
+11 Değişiklik: simulate._sample_lineups — kaleci çıkmaz, en fazla 5 ve yedek sayısı kadar çıkış; fazlası sahada kalır.
+12 u,v senaryo bazlı: simulate.sample_shots Gamma-Poisson eşleniğiyle tam örnekleme (F|c ∝ NB(F;μuv,k)Pois(c-F;ω), Λ|F ~ Gamma(k+F, k/μ+uv), kalanlar Poisson).
+
+İstediğim: her madde için "KAPANDI" ya da "AÇIK: neden". Sonra düzeltmelerin yarattığı YENİ gerçek hataları (en fazla 6, dosya:satır + senaryo). Özellikle 9 ve 12'nin matematiğini kontrol et. Kısa ve net ol.

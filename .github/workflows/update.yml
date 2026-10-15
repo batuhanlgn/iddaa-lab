@@ -1,0 +1,129 @@
+name: Güncelle ve yayınla
+
+on:
+  schedule:
+    - cron: "7 */3 * * *"   # 3 saatte bir: veri + iddaa oranları + model + tahmin + kupon
+    - cron: "37 2 * * 1"    # pazartesi: ek olarak walk-forward backtest
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "Çalıştırılacak iş"
+        type: choice
+        options: [refresh, odds, backtest]
+        default: refresh
+
+permissions:
+  contents: write   # veritabanını Release'e yükle
+  pages: write
+  id-token: write
+  actions: write    # zamanlanmış çalışmayı canlı tut
+
+concurrency:
+  group: iddaa-lab-update
+  cancel-in-progress: false
+
+env:
+  DATA_TAG: data
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Python bağımlılıkları
+        run: |
+          python -m venv backend/.venv
+          backend/.venv/bin/pip install -q -r backend/requirements.txt
+
+      - name: Veritabanını indir (Release)
+        run: |
+          mkdir -p data
+          if gh release download "$DATA_TAG" --pattern "iddaa_lab.sqlite3.gz" --dir data; then
+            gunzip -f data/iddaa_lab.sqlite3.gz
+            echo "HAVE_DB=1" >> "$GITHUB_ENV"
+          else
+            echo "Veritabanı yok: ilk kurulum yapılacak"
+            echo "HAVE_DB=0" >> "$GITHUB_ENV"
+          fi
+
+      - name: Çalıştırılacak işi seç
+        id: pick
+        run: |
+          if [ "$HAVE_DB" != "1" ]; then
+            echo "jobs=bootstrap" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "jobs=${{ inputs.job }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "37 2 * * 1" ]; then
+            echo "jobs=backtest refresh" >> "$GITHUB_OUTPUT"
+          else
+            echo "jobs=refresh" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Model ve tahminler
+        working-directory: backend
+        run: |
+          for j in ${{ steps.pick.outputs.jobs }}; do
+            echo "::group::$j"
+            .venv/bin/python -m app.jobs "$j"
+            echo "::endgroup::"
+          done
+
+      - name: Veritabanını kaydet (Release)
+        if: ${{ !cancelled() && hashFiles('data/iddaa_lab.sqlite3') != '' }}
+        run: |
+          python3 -c "import sqlite3; c=sqlite3.connect('data/iddaa_lab.sqlite3'); c.execute('PRAGMA wal_checkpoint(TRUNCATE)'); c.close()"
+          gzip -kf data/iddaa_lab.sqlite3
+          gh release view "$DATA_TAG" >/dev/null 2>&1 || \
+            gh release create "$DATA_TAG" --title "Veri" --notes "GitHub Actions tarafından otomatik güncellenen veritabanı."
+          gh release upload "$DATA_TAG" data/iddaa_lab.sqlite3.gz --clobber
+
+      - name: Statik veriyi dışa aktar
+        working-directory: backend
+        run: .venv/bin/python -m app.export_static ../web/static-data
+
+      - name: Siteyi derle
+        working-directory: web
+        env:
+          IDDAA_STATIC_DIR: static-data
+          NEXT_BASE_PATH: /${{ github.event.repository.name }}
+          NEXT_PUBLIC_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: |
+          rm -rf app/api   # yerel arka uç proxy'si statik sitede yok
+          npm ci
+          npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: web/out
+
+      - name: Zamanlanmış çalışmayı canlı tut
+        continue-on-error: true
+        run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/update.yml/enable"
+
+  deploy:
+    needs: update
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
