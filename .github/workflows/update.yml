@@ -11,8 +11,12 @@ on:
       job:
         description: "Çalıştırılacak iş"
         type: choice
-        options: [refresh, lineups, odds, backtest]
-        default: refresh
+        options: [auto, refresh, lineups, odds, backtest]
+        default: auto
+      delay:
+        description: "Başlamadan önce bekleme (sn) — yedek zincir için"
+        required: false
+        default: "0"
 
 permissions:
   contents: write   # veritabanını Release'e yükle
@@ -35,6 +39,11 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       PYTHONIOENCODING: utf-8
     steps:
+      # Yedek zincir: GitHub zamanlayıcısı tetiklenmezse bir önceki çalışma bu çalışmayı gecikmeli başlatır
+      - name: Zincir beklemesi
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.delay != '' && inputs.delay != '0' }}
+        run: sleep ${{ inputs.delay }}
+
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -83,7 +92,7 @@ jobs:
           H=$(date -u +%H); M=$(date -u +%M)
           if [ "$HAVE_DB" != "1" ]; then
             echo "jobs=bootstrap" >> "$GITHUB_OUTPUT"
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.job }}" != "auto" ]; then
             echo "jobs=${{ inputs.job }}" >> "$GITHUB_OUTPUT"
           elif [ "${{ github.event.schedule }}" = "37 2 * * 1" ]; then
             echo "jobs=backtest refresh" >> "$GITHUB_OUTPUT"
@@ -145,6 +154,22 @@ jobs:
       - name: Zamanlanmış çalışmayı canlı tut
         continue-on-error: true
         run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/update.yml/enable"
+
+      # GitHub zamanlayıcısı son 50 dakikada tetiklenmediyse ve sırada başka çalışma yoksa bir sonrakini
+      # 25 dk gecikmeyle başlat (≈30 dk döngü). Zamanlayıcı çalışmaya başlayınca zincir kendiliğinden durur.
+      - name: Yedek zincir
+        if: ${{ always() }}
+        continue-on-error: true
+        run: |
+          LAST=$(gh api "repos/${{ github.repository }}/actions/runs?event=schedule&per_page=1" --jq '.workflow_runs[0].created_at // ""')
+          NOW=$(date -u +%s)
+          if [ -n "$LAST" ] && [ $(( NOW - $(date -u -d "$LAST" +%s) )) -lt 3000 ]; then
+            echo "Zamanlayıcı çalışıyor (son: $LAST); zincir gerekmiyor"; exit 0
+          fi
+          OTHERS=$(gh run list --repo "${{ github.repository }}" --workflow update.yml --limit 20 --json status,databaseId             --jq '[.[] | select(.status != "completed" and .databaseId != ${{ github.run_id }})] | length')
+          if [ "$OTHERS" != "0" ]; then echo "Sırada başka çalışma var ($OTHERS); zincir başlatılmadı"; exit 0; fi
+          gh workflow run update.yml --repo "${{ github.repository }}" --ref main -f job=auto -f delay=1500
+          echo "Zamanlayıcı tetiklenmiyor (son: ${LAST:-hiç}); sonraki çalışma 25 dk sonra başlayacak"
 
   deploy:
     needs: update
