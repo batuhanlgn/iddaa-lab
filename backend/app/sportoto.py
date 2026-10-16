@@ -1,11 +1,15 @@
-"""Spor Toto: haftalık program, maç olasılıkları, bütçeli sistem kuponu ve sonuçlandırma.
+"""Spor Toto: haftalık program, maç olasılıkları, bütçeli sistem kuponları ve sonuçlandırma.
 
 Kupon kuralı: her maç için 1, 2 ya da 3 sonuç işaretlenir; kolon sayısı = Π(işaret sayısı), maliyet = kolon × kolon
-bedeli. Amaç, bütçe (TOTO_BUDGET_TL) ve kupon başına kolon sınırı içinde 15 maçı da bilme olasılığını en büyütmek:
-max Σ log(kapsanan olasılık_i)  koşul: 2^çift · 3^üçlü ≤ en çok kolon. Çift/üçlü sayısı küçük olduğundan kesin DP.
+bedeli. Haftada üç kupon, her biri bütçe (TOTO_BUDGET_TL) ve kupon başına kolon sınırı içinde:
+  olasilik     15 maçı da bilme olasılığını en büyütür: max Σ log(kapsanan olasılık_i)  koşul: 2^çift · 3^üçlü ≤ en çok
+               kolon. Çift/üçlü sayısı küçük olduğundan kesin DP (optimize).
+  kalabalik    oynanma oranlarına (kalabalık) göre beklenen ikramiyeyi en büyütür (sportoto_crowd).
+  kalabalik_2  aynı amaç, kalabalik ile ortak kolonu yok (sportoto_crowd).
 
-Haftada tek kupon (toto_coupons, PK hafta). Kapanıştan TOTO_LOCK_MINUTES önce kilitlenir; o ana kadar her güncellemede
-en taze olasılıklarla yeniden kurulur. Sonuç açıklanınca kazanan kolon sayıları ve ikramiye hesaplanıp saklanır.
+Kuponlar (toto_coupon_sets, PK hafta + tür) kapanıştan TOTO_LOCK_MINUTES önce ayrı ayrı kilitlenir; o ana kadar her
+güncellemede en taze olasılıklar ve oynanma oranlarıyla yeniden kurulur. Kalabalık verisi ya da N/havuz tahmini yoksa
+yalnız Kupon 1 kurulur (neden yükte yazar). Sonuç açıklanınca her kuponun kazanan kolonları ve ikramiyesi saklanır.
 """
 from __future__ import annotations
 
@@ -17,7 +21,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from . import db
-from .config import TOTO_BUDGET_TL, TOTO_DEFAULT_COLUMN_PRICE, TOTO_DEFAULT_MAX_COLUMN, TOTO_LOCK_MINUTES
+from .config import (TOTO_BUDGET_TL, TOTO_CROWD_COUPONS, TOTO_DEFAULT_COLUMN_PRICE, TOTO_DEFAULT_MAX_COLUMN,
+                     TOTO_LOCK_MINUTES)
 from .matching import similarity
 from .model import markets as mk
 from .sources import sportoto as src
@@ -28,6 +33,16 @@ Progress = Callable[[str], None]
 
 OUTCOMES = ("1", "0", "2")
 TIERS = (15, 14, 13, 12)
+KINDS = ("olasilik", "kalabalik", "kalabalik_2")
+KIND_INFO: dict[str, tuple[str, str]] = {
+    "olasilik": ("Kupon 1 · Olasılık", "15 maçı da bilme olasılığını en büyüten kupon (bugünkü mantık)."),
+    "kalabalik": ("Kupon 2 · Kalabalık",
+                  "Beklenen ikramiyeyi en büyüten kupon: az oynanan ama makul sonuçlara ağırlık verir; herkesin oynadığı "
+                  "favori tutsa da ikramiye çok kişiyle bölünür."),
+    "kalabalik_2": ("Kupon 3 · Kalabalık (ikinci)",
+                    "Kupon 2 ile aynı amaç, ama Kupon 2'nin hiçbir kolonunu tekrar etmez (en az bir maçta işaretler ayrık): "
+                    "ikinci en iyi seçimler."),
+}
 _MATCH_WINDOW_S = 100 * 60
 _SUFFIXES = (" a.ş.", " a.ş", " aş")
 
@@ -214,9 +229,14 @@ def _pool(con: sqlite3.Connection) -> dict[str, Any]:
     return {"column_price": TOTO_DEFAULT_COLUMN_PRICE, "max_column": TOTO_DEFAULT_MAX_COLUMN, "source": "varsayılan"}
 
 
+def max_columns(pool: dict[str, Any]) -> int:
+    return min(int(TOTO_BUDGET_TL // pool["column_price"]), int(pool["max_column"]))
+
+
 def build_coupon(con: sqlite3.Connection, cycle_no: int) -> dict[str, Any]:
+    """Kupon 1 (olasilik); Kupon 2/3 bu yükün olasılıkları ve maç bilgisiyle kurulur."""
     pool = _pool(con)
-    max_cols = min(int(TOTO_BUDGET_TL // pool["column_price"]), int(pool["max_column"]))
+    max_cols = max_columns(pool)
     evs = con.execute("SELECT * FROM toto_events WHERE cycle_no=? ORDER BY event_no", (cycle_no,)).fetchall()
     infos = [event_probs(con, e) for e in evs]
     picks = optimize([i["probs"] for i in infos], max_cols)
@@ -231,7 +251,9 @@ def build_coupon(con: sqlite3.Connection, cycle_no: int) -> dict[str, Any]:
             "competition": e["competition"], "kickoff_utc": e["kickoff_utc"], "picks": sel, "cover": cov,
             "kind": {1: "banko", 2: "çift", 3: "üçlü"}[len(sel)], **info,
         })
+    title, desc = KIND_INFO["olasilik"]
     return {
+        "kind": "olasilik", "title": title, "description": desc, "expected_prize": None, "expected_prize_by_tier": None,
         "cycle_no": cycle_no, "budget": TOTO_BUDGET_TL, "column_price": pool["column_price"], "max_column": pool["max_column"],
         "pool_source": pool["source"], "columns": columns, "cost": columns * pool["column_price"],
         "p15": dist[n] if n == 15 else 0.0,
@@ -241,33 +263,71 @@ def build_coupon(con: sqlite3.Connection, cycle_no: int) -> dict[str, Any]:
     }
 
 
+def _upsert(con: sqlite3.Connection, c: dict[str, Any], locked: int, ts: str) -> None:
+    con.execute(
+        """INSERT INTO toto_coupon_sets(cycle_no, kind, created_at, updated_at, locked, budget, column_price, columns, cost,
+                                        p15, expected_prize, payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(cycle_no, kind) DO UPDATE SET updated_at=excluded.updated_at, locked=excluded.locked,
+             budget=excluded.budget, column_price=excluded.column_price, columns=excluded.columns, cost=excluded.cost,
+             p15=excluded.p15, expected_prize=excluded.expected_prize, payload=excluded.payload""",
+        (c["cycle_no"], c["kind"], ts, ts, locked, c["budget"], c["column_price"], c["columns"], c["cost"], c["p15"],
+         c.get("expected_prize"), json.dumps(c, ensure_ascii=False)),
+    )
+
+
+_CROWD_OFF = "Kalabalık kuponları kapalı: önce oynanma oranı verisi toplanıyor (backtest'te Kupon 1'den kötü çıktı)."
+
+
+def active_kinds() -> tuple[str, ...]:
+    """Üretilen ve gösterilen kupon türleri (kalabalık kuponları config.TOTO_CROWD_COUPONS ile açılır)."""
+    return KINDS if TOTO_CROWD_COUPONS else ("olasilik",)
+
+
 def update_coupon(con: sqlite3.Connection, cycle_no: int) -> str:
+    """Haftanın üç kuponunu kurar/günceller; kilitli kupon değişmez. Kalabalık kuponları kurulamazsa nedeni Kupon 1'in
+    yüküne (crowd_status) yazılır ve kilitlenmemiş eski kalabalık kuponları silinir."""
     w = con.execute("SELECT payin_end_utc FROM toto_weeks WHERE cycle_no=?", (cycle_no,)).fetchone()
     if w is None:
         return "hafta yok"
     now = datetime.now(timezone.utc)
     end = _dt(w["payin_end_utc"])
-    existing = con.execute("SELECT locked FROM toto_coupons WHERE cycle_no=?", (cycle_no,)).fetchone()
-    if existing is not None and existing["locked"]:
+    rows = {r["kind"]: r for r in con.execute("SELECT kind, locked FROM toto_coupon_sets WHERE cycle_no=?", (cycle_no,))}
+    if "olasilik" in rows and all(r["locked"] for r in rows.values()):
         return "kilitli"
     if now >= end:
-        if existing is not None:
-            con.execute("UPDATE toto_coupons SET locked=1 WHERE cycle_no=?", (cycle_no,))
+        if rows:
+            con.execute("UPDATE toto_coupon_sets SET locked=1 WHERE cycle_no=?", (cycle_no,))
             return "kapanış geçti, kilitlendi"
         return "kapanış geçti, kupon yok"
-    c = build_coupon(con, cycle_no)
-    locked = int(now >= end - timedelta(minutes=TOTO_LOCK_MINUTES))
+    lock_at = end - timedelta(minutes=TOTO_LOCK_MINUTES)
+    locked = int(now >= lock_at)
+    base = build_coupon(con, cycle_no)
+    from .sportoto_crowd import build_crowd_coupons  # geç içe aktarma: sportoto_crowd bu modülü kullanır
+
+    built: dict[str, dict[str, Any]] = {}
+    reason: str | None = _CROWD_OFF
+    if TOTO_CROWD_COUPONS:
+        try:
+            built, reason = build_crowd_coupons(con, cycle_no, base, lock_at, max_columns(_pool(con)))
+        except Exception as e:  # noqa: BLE001 - kalabalık kuponu hatası Kupon 1'i engellemesin
+            log.exception("Kalabalık kuponları kurulamadı")
+            built, reason = {}, f"Kalabalık kuponları hesaplanamadı ({type(e).__name__}: {e})"
+    coupons = {"olasilik": built.get("olasilik", base), **{k: v for k, v in built.items() if k != "olasilik"}}
+    coupons["olasilik"]["crowd_status"] = {"available": reason is None, "reason": reason}
     ts = _iso(now)
-    con.execute(
-        """INSERT INTO toto_coupons(cycle_no, created_at, updated_at, locked, budget, column_price, columns, cost, p15, payload)
-           VALUES(?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(cycle_no) DO UPDATE SET updated_at=excluded.updated_at, locked=excluded.locked,
-             budget=excluded.budget, column_price=excluded.column_price, columns=excluded.columns, cost=excluded.cost,
-             p15=excluded.p15, payload=excluded.payload""",
-        (cycle_no, ts, ts, locked, c["budget"], c["column_price"], c["columns"], c["cost"], c["p15"],
-         json.dumps(c, ensure_ascii=False)),
-    )
-    return f"{c['columns']} kolon · {c['cost']:.0f} TL · 15 bilme %{100 * c['p15']:.3f}" + (" · kilitlendi" if locked else "")
+    for kind in KINDS:
+        if kind in rows and rows[kind]["locked"]:
+            continue
+        if kind in coupons:
+            _upsert(con, coupons[kind], locked, ts)
+        elif kind in rows:
+            con.execute("DELETE FROM toto_coupon_sets WHERE cycle_no=? AND kind=?", (cycle_no, kind))
+    parts = [f"{k}: {c['columns']} kolon · {c['cost']:.0f} TL · 15 bilme %{100 * c['p15']:.3f}"
+             + (f" · beklenen ikramiye {c['expected_prize']:.0f} TL" if c.get("expected_prize") is not None else "")
+             for k, c in coupons.items()]
+    if reason:
+        parts.append(f"kalabalık kuponu yok: {reason}")
+    return " | ".join(parts) + (" · kilitlendi" if locked else "")
 
 
 # ---------------------------------------------------------------- veri toplama ve sonuçlandırma
@@ -290,57 +350,73 @@ def _store_week(con: sqlite3.Connection, w: src.TotoWeek, fetched_at: str) -> No
 
 
 def settle_coupon(con: sqlite3.Connection, cycle_no: int) -> str | None:
-    row = con.execute("SELECT * FROM toto_coupons WHERE cycle_no=? AND status='open'", (cycle_no,)).fetchone()
+    """Haftanın açık kuponlarını (her tür ayrı) resmi sonuç ve ikramiye tablosuyla sonuçlandırır."""
+    rows = con.execute("SELECT * FROM toto_coupon_sets WHERE cycle_no=? AND status='open'", (cycle_no,)).fetchall()
     w = con.execute("SELECT dividends FROM toto_weeks WHERE cycle_no=?", (cycle_no,)).fetchone()
-    if row is None or w is None or w["dividends"] is None:
+    if not rows or w is None or w["dividends"] is None:
         return None
     winners = {r["event_no"]: r["winner"] for r in con.execute(
         "SELECT event_no, winner FROM toto_events WHERE cycle_no=?", (cycle_no,))}
-    payload = json.loads(row["payload"])
-    picks = [ev["picks"] for ev in payload["events"]]
-    res = [winners.get(ev["event_no"]) for ev in payload["events"]]
-    if any(r is None for r in res):
-        return None
-    hits = sum(1 for sel, r in zip(picks, res) if r in sel)
-    cols = winning_columns(picks, res)  # type: ignore[arg-type]
     amounts = {d["tier"]: d["amount"] for d in json.loads(w["dividends"])}
-    prize = sum(n * amounts.get(k, 0.0) for k, n in cols.items())
-    con.execute(
-        "UPDATE toto_coupons SET status='settled', hits=?, winning_columns=?, prize=?, settled_at=?, locked=1 WHERE cycle_no=?",
-        (hits, json.dumps({str(k): v for k, v in cols.items()}), prize, _iso(datetime.now(timezone.utc)), cycle_no),
-    )
-    return f"hafta {cycle_no}: {hits}/15 · ikramiye {prize:.2f} TL"
+    out = []
+    for row in rows:
+        payload = json.loads(row["payload"])
+        picks = [ev["picks"] for ev in payload["events"]]
+        res = [winners.get(ev["event_no"]) for ev in payload["events"]]
+        if any(r is None for r in res):
+            return None
+        hits = sum(1 for sel, r in zip(picks, res) if r in sel)
+        cols = winning_columns(picks, res)  # type: ignore[arg-type]
+        prize = sum(n * amounts.get(k, 0.0) for k, n in cols.items())
+        con.execute(
+            """UPDATE toto_coupon_sets SET status='settled', hits=?, winning_columns=?, prize=?, settled_at=?, locked=1
+               WHERE cycle_no=? AND kind=?""",
+            (hits, json.dumps({str(k): v for k, v in cols.items()}), prize, _iso(datetime.now(timezone.utc)), cycle_no,
+             row["kind"]),
+        )
+        out.append(f"{row['kind']} {hits}/15 · {prize:.2f} TL")
+    return f"hafta {cycle_no}: " + " · ".join(out)
 
 
 async def ingest_toto(con: sqlite3.Connection, progress: Progress) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     out: dict[str, Any] = {}
+    fetched_at = _iso(now)
     async with PoliteClient() as client:
         cfg = await src.fetch_pool_config(client)
         week = await src.fetch_open_week(client)
         pending = [r["cycle_no"] for r in con.execute(
             "SELECT cycle_no FROM toto_weeks WHERE status='open' AND payin_end_utc < ?", (_iso(now),))]
         results = {c: await src.fetch_result(client, c) for c in pending}
-    fetched_at = _iso(now)
-    with db.tx(con):
-        if cfg is not None:
-            db.meta_set(con, "toto_pool", {**cfg, "fetched_at": fetched_at})
+        with db.tx(con):
+            if cfg is not None:
+                db.meta_set(con, "toto_pool", {**cfg, "fetched_at": fetched_at})
+            if week is not None:
+                _store_week(con, week, fetched_at)
+            for c, res in results.items():
+                if res is None or res.dividends is None or any(e.winner is None for e in res.events):
+                    continue
+                _store_week(con, res, fetched_at)
+                con.execute("UPDATE toto_weeks SET dividends=?, status='settled' WHERE cycle_no=?",
+                            (json.dumps(res.dividends, ensure_ascii=False), c))
         if week is not None:
-            _store_week(con, week, fetched_at)
-        for c, res in results.items():
-            if res is None or res.dividends is None or any(e.winner is None for e in res.events):
-                continue
-            _store_week(con, res, fetched_at)
-            con.execute("UPDATE toto_weeks SET dividends=?, status='settled' WHERE cycle_no=?",
-                        (json.dumps(res.dividends, ensure_ascii=False), c))
+            out["matched"] = match_events(con, week.cycle_no)
+        # Kalabalık (oynanma oranları) + N/havuz tahmini için son haftaların resmi sonuçları: hata Kupon 1'i durdurmaz
+        try:
+            from .sportoto_crowd import refresh_crowd  # geç içe aktarma: sportoto_crowd bu modülü kullanır
+
+            out["crowd"] = await refresh_crowd(con, client, week.cycle_no if week is not None else None, progress)
+        except Exception as e:  # noqa: BLE001 - resmi olmayan kaynak; kupon yine kurulur (Kupon 2/3 nedeniyle birlikte)
+            log.exception("Kalabalık verisi alınamadı")
+            out["crowd"] = f"hata: {type(e).__name__}: {e}"
+            progress(f"UYARI: Spor Toto kalabalık verisi alınamadı ({type(e).__name__}: {e})")
     if week is not None:
-        out["matched"] = match_events(con, week.cycle_no)
         with db.tx(con):
             out["coupon"] = update_coupon(con, week.cycle_no)
         out["week"] = week.cycle_no
     # Açık hafta kapanmış ama sonuç bekleyen kuponlar kilitlenir
     with db.tx(con):
-        for r in con.execute("SELECT cycle_no FROM toto_coupons WHERE locked=0").fetchall():
+        for r in con.execute("SELECT DISTINCT cycle_no FROM toto_coupon_sets WHERE locked=0").fetchall():
             if week is None or r["cycle_no"] != week.cycle_no:
                 update_coupon(con, r["cycle_no"])
         out["settled"] = [s for c in results if (s := settle_coupon(con, c))]
@@ -350,31 +426,67 @@ async def ingest_toto(con: sqlite3.Connection, progress: Progress) -> dict[str, 
 
 # ---------------------------------------------------------------- görünüm
 
+_NO_COUPON = "Program alındı ama kupon kurulamadı: kapanış geçmişti ya da güncelleme o saatte çalışmadı."
+_NO_CROWD_LEGACY = "Bu hafta için kalabalık kuponu yok (kupon, üç kupon düzeninden önce kurulmuştu)."
+
+
 def toto_view(con: sqlite3.Connection) -> dict[str, Any]:
     pool = _pool(con)
     w = con.execute("SELECT * FROM toto_weeks ORDER BY cycle_no DESC LIMIT 1").fetchone()
     week = dict(w) if w else None
-    coupon = None
-    if w is not None:
-        r = con.execute("SELECT * FROM toto_coupons WHERE cycle_no=?", (w["cycle_no"],)).fetchone()
-        if r is not None:
-            coupon = {**json.loads(r["payload"]), "locked": bool(r["locked"]), "updated_at": r["updated_at"],
-                      "status": r["status"], "hits": r["hits"], "prize": r["prize"]}
-            res = {e["event_no"]: e for e in con.execute(
-                "SELECT event_no, result, winner FROM toto_events WHERE cycle_no=?", (w["cycle_no"],))}
-            for ev in coupon["events"]:
-                x = res.get(ev["event_no"])
-                ev["result"], ev["winner"] = (x["result"], x["winner"]) if x else (None, None)
-        if week is not None:
-            week["dividends"] = json.loads(week["dividends"]) if week["dividends"] else None
-    hist = con.execute(
-        "SELECT COUNT(*) n, AVG(hits) avg_hits, MAX(hits) best, SUM(cost) cost, SUM(prize) prize FROM toto_coupons WHERE status='settled'"
-    ).fetchone()
+    slots: list[dict[str, Any]] = []
+    crowd: dict[str, Any] | None = None
+    if w is not None and week is not None:
+        week["dividends"] = json.loads(week["dividends"]) if week["dividends"] else None
+        rows = {r["kind"]: r for r in con.execute("SELECT * FROM toto_coupon_sets WHERE cycle_no=?", (w["cycle_no"],))}
+        res = {e["event_no"]: e for e in con.execute(
+            "SELECT event_no, result, winner FROM toto_events WHERE cycle_no=?", (w["cycle_no"],))}
+        base_payload = json.loads(rows["olasilik"]["payload"]) if "olasilik" in rows else None
+        crowd_status = (base_payload or {}).get("crowd_status")
+        for kind in active_kinds():
+            title, desc = KIND_INFO[kind]
+            r = rows.get(kind)
+            coupon = None
+            reason = None
+            if r is not None:
+                coupon = {**json.loads(r["payload"]), "locked": bool(r["locked"]), "updated_at": r["updated_at"],
+                          "status": r["status"], "hits": r["hits"], "prize": r["prize"],
+                          "winning_columns": json.loads(r["winning_columns"]) if r["winning_columns"] else None}
+                coupon.setdefault("kind", kind)
+                coupon.setdefault("title", title)
+                coupon.setdefault("description", desc)
+                coupon.setdefault("expected_prize", r["expected_prize"])
+                for ev in coupon["events"]:
+                    x = res.get(ev["event_no"])
+                    ev["result"], ev["winner"] = (x["result"], x["winner"]) if x else (None, None)
+                    ev.setdefault("crowd", None)
+            elif kind == "olasilik" or base_payload is None:
+                reason = _NO_COUPON
+            else:
+                reason = (crowd_status or {}).get("reason") or _NO_CROWD_LEGACY
+            slots.append({"kind": kind, "title": title, "description": desc, "coupon": coupon, "reason": reason})
+        crows = con.execute("SELECT * FROM toto_crowd WHERE cycle_no=? ORDER BY event_no", (w["cycle_no"],)).fetchall()
+        cw = con.execute("SELECT * FROM toto_crowd_weeks WHERE cycle_no=?", (w["cycle_no"],)).fetchone()
+        crowd = {
+            "available": len(crows) == 15,
+            "reason": None if len(crows) == 15 else (crowd_status or {}).get("reason")
+            or "Bu hafta için kalabalık (oynanma oranı) verisi yok.",
+            "fetched_at": max((r["fetched_at"] for r in crows), default=None),
+            "tk_name": cw["tk_name"] if cw else None, "source": "totokazan.com (resmi değil)",
+            "events": [{"event_no": r["event_no"], "1": r["p1"], "0": r["px"], "2": r["p2"]} for r in crows],
+        }
+    hist_rows = {r["kind"]: r for r in con.execute(
+        """SELECT kind, COUNT(*) n, AVG(hits) avg_hits, MAX(hits) best, SUM(cost) cost, SUM(prize) prize
+           FROM toto_coupon_sets WHERE status='settled' GROUP BY kind""")}
+    by_kind = {k: {"settled": h["n"] if h else 0, "avg_hits": h["avg_hits"] if h else None, "best_hits": h["best"] if h else None,
+                   "total_cost": (h["cost"] or 0.0) if h else 0.0, "total_prize": (h["prize"] or 0.0) if h else 0.0}
+               for k in active_kinds() for h in [hist_rows.get(k)]}
     return {
-        "week": week, "coupon": coupon,
+        "week": week, "coupons": slots, "crowd": crowd, "crowd_coupons": TOTO_CROWD_COUPONS,
+        "weekly_cost": sum(s["coupon"]["cost"] for s in slots if s["coupon"] is not None),
         "pool": {"column_price": pool["column_price"], "max_column": pool["max_column"], "source": pool["source"],
-                 "budget": TOTO_BUDGET_TL},
-        "history": {"settled": hist["n"], "avg_hits": hist["avg_hits"], "best_hits": hist["best"],
-                    "total_cost": hist["cost"] or 0.0, "total_prize": hist["prize"] or 0.0},
+                 "budget": TOTO_BUDGET_TL, "weekly_budget": TOTO_BUDGET_TL * len(active_kinds())},
+        "history": {"by_kind": by_kind, "total_cost": sum(v["total_cost"] for v in by_kind.values()),
+                    "total_prize": sum(v["total_prize"] for v in by_kind.values())},
         "generated_at": _iso(datetime.now(timezone.utc)),
     }

@@ -276,6 +276,51 @@ CREATE TABLE IF NOT EXISTS toto_coupons (
     prize REAL,
     settled_at TEXT
 );
+-- Haftada üç kupon (olasilik | kalabalik | kalabalik_2); her biri ayrı kilitlenir ve sonuçlandırılır.
+-- Eski tek kupon tablosu (toto_coupons) kayıtları migrate() ile kind='olasilik' olarak buraya taşınır.
+CREATE TABLE IF NOT EXISTS toto_coupon_sets (
+    cycle_no INTEGER NOT NULL,
+    kind TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    locked INTEGER NOT NULL DEFAULT 0,
+    budget REAL NOT NULL,
+    column_price REAL NOT NULL,
+    columns INTEGER NOT NULL,
+    cost REAL NOT NULL,
+    p15 REAL NOT NULL,
+    expected_prize REAL,              -- kalabalık modeline göre beklenen ikramiye (veri yoksa NULL)
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',  -- open | settled
+    hits INTEGER,
+    winning_columns TEXT,             -- JSON {"15": n, "14": n, ...}
+    prize REAL,
+    settled_at TEXT,
+    PRIMARY KEY (cycle_no, kind)
+);
+-- Kalabalık: maç başı oynanma oranı (totokazan.com, resmi değil; açık haftada her güncellemede yenilenir) + iddaa oranı
+CREATE TABLE IF NOT EXISTS toto_crowd (
+    cycle_no INTEGER NOT NULL,
+    event_no INTEGER NOT NULL,
+    p1 REAL NOT NULL,
+    px REAL NOT NULL,
+    p2 REAL NOT NULL,
+    o1 REAL,
+    ox REAL,
+    o2 REAL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (cycle_no, event_no)
+);
+CREATE TABLE IF NOT EXISTS toto_crowd_weeks (
+    cycle_no INTEGER PRIMARY KEY,
+    tk_week_id INTEGER NOT NULL,
+    tk_name TEXT,
+    status TEXT NOT NULL,             -- open | settled (settled: son yüzdeler, bir kez)
+    platform_columns INTEGER,         -- totokazan kolonOynatildi (kendi platformu; resmi toplam değil)
+    n_name_matches INTEGER NOT NULL,
+    source_fetched_at TEXT,
+    fetched_at TEXT NOT NULL
+);
 """
 
 _local = threading.local()
@@ -302,20 +347,35 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+# Veri taşıma (idempotent): eski tek Spor Toto kuponu -> üçlü kupon tablosunda 'olasilik'
+DATA_MIGRATIONS: tuple[str, ...] = (
+    """INSERT OR IGNORE INTO toto_coupon_sets(cycle_no, kind, created_at, updated_at, locked, budget, column_price, columns,
+           cost, p15, expected_prize, payload, status, hits, winning_columns, prize, settled_at)
+       SELECT cycle_no, 'olasilik', created_at, updated_at, locked, budget, column_price, columns, cost, p15, NULL, payload,
+           status, hits, winning_columns, prize, settled_at FROM toto_coupons""",
+)
+
+
+def migrate(con: sqlite3.Connection) -> None:
+    con.executescript(SCHEMA)
+    from .similar_odds import SCHEMA_SQL as SIMILAR_SCHEMA  # geç içe aktarma: similar_odds db'yi kullanır
+
+    con.executescript(SIMILAR_SCHEMA)
+    from .sportoto_backtest import SCHEMA_SQL as TOTO_HIST_SCHEMA
+
+    con.executescript(TOTO_HIST_SCHEMA)
+    for table, column, ddl in MIGRATIONS:
+        cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
+        if column not in cols:
+            con.execute(ddl)
+    for sql in DATA_MIGRATIONS:
+        con.execute(sql)
+
+
 def init_db() -> None:
     con = connect()
     try:
-        con.executescript(SCHEMA)
-        from .similar_odds import SCHEMA_SQL as SIMILAR_SCHEMA  # geç içe aktarma: similar_odds db'yi kullanır
-
-        con.executescript(SIMILAR_SCHEMA)
-        from .sportoto_backtest import SCHEMA_SQL as TOTO_HIST_SCHEMA
-
-        con.executescript(TOTO_HIST_SCHEMA)
-        for table, column, ddl in MIGRATIONS:
-            cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
-            if column not in cols:
-                con.execute(ddl)
+        migrate(con)
     finally:
         con.close()
 

@@ -42,6 +42,7 @@ def export(out: Path) -> dict[str, int]:
     _write(out, "standings.json", api.standings())
     _write(out, "toto.json", api.toto())
     _write(out, "toto_backtest.json", api.toto_backtest())
+    _write(out, "toto_crowd_backtest.json", api.toto_crowd_backtest())
     from .live import live_base
 
     _write(out, "live_base.json", live_base(con))

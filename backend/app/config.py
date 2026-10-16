@@ -153,3 +153,7 @@ TOTO_LOCK_MINUTES = 60  # kapanıştan bu kadar önce kupon kilitlenir (son resm
 # doğrulanan değerler kullanılır ve arayüzde "varsayılan" diye belirtilir.
 TOTO_DEFAULT_COLUMN_PRICE = 10.0
 TOTO_DEFAULT_MAX_COLUMN = 2500
+# Kalabalığa göre Kupon 2/3 (sportoto_crowd). Kullanıcı kararı (16 Eki 2026): 26 haftalık backtest'te K1'den kötü ve
+# beklenen ikramiye hesabı ~6 kat iyimser -> kupon üretilmez; oynanma oranları arşivlenir, kalabalık backtest'i haftalık
+# yenilenir. Örneklem büyüyüp sonuç olumlu çıkarsa True yapılır.
+TOTO_CROWD_COUPONS = False

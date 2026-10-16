@@ -662,6 +662,8 @@ export interface CoverageResponse {
 
 export type TotoOutcome = "1" | "0" | "2";
 export type TotoSource = "harman" | "model" | "piyasa" | "yok";
+/** olasilik: 15 bilme olasılığı · kalabalik: beklenen ikramiye · kalabalik_2: beklenen ikramiye, Kupon 2 ile ortak kolon yok */
+export type TotoKind = "olasilik" | "kalabalik" | "kalabalik_2";
 
 export interface TotoEvent {
   event_no: number;
@@ -683,9 +685,36 @@ export interface TotoEvent {
   market: Record<TotoOutcome, number> | null;
   result: string | null;
   winner: TotoOutcome | null;
+  /** oynanma oranı (totokazan, toplamı 1); kalabalık verisi yoksa null */
+  crowd: Record<TotoOutcome, number> | null;
+}
+
+/** backend/app/sportoto_crowd.py Market.to_json — N (etkin kalabalık kolon) ve kademe havuzu tahmini */
+export interface TotoMarket {
+  n_columns: number;
+  pools: Record<string, number>;
+  carry: number;
+  n_weeks: number;
+  basis: { cycle_no: number; n_eff: number; winners: Record<string, number>; base_pools: Record<string, number>; price: number | null }[];
+  notes: string[];
+  /** kalabalığın kazanan sayısı için PB alt sınırı (önceki haftalarda en sürprizli gerçekleşen sonuç) */
+  pb_floor: Record<string, number>;
+  floor_weeks: number;
+  /** beklenen ikramiyede sonuç olasılığı p^a · oynanma^(1−a) */
+  blend_a: number;
+  blend_weeks: number;
+}
+
+export interface TotoDiffItem {
+  o: TotoOutcome;
+  p: number;
+  crowd: number;
 }
 
 export interface TotoCoupon {
+  kind: TotoKind;
+  title: string;
+  description: string;
   cycle_no: number;
   budget: number;
   column_price: number;
@@ -703,6 +732,45 @@ export interface TotoCoupon {
   status: "open" | "settled";
   hits: number | null;
   prize: number | null;
+  winning_columns: Record<string, number> | null;
+  /** kalabalık modeline göre beklenen ikramiye (TL); kalabalık verisi yoksa null */
+  expected_prize: number | null;
+  expected_prize_se?: number | null;
+  expected_prize_by_tier: Record<string, number> | null;
+  market?: TotoMarket;
+  crowd_source?: { fetched_at: string; tk_week_id: number | null; tk_name: string | null; source: string };
+  /** yalnız kalabalık kuponları: Kupon 1'den farklı maçlar ve kısa açıklama */
+  diffs?: { event_no: number; from: TotoOutcome[]; to: TotoOutcome[]; added: TotoDiffItem[]; removed: TotoDiffItem[] }[];
+  why?: string;
+  common_columns_with_kalabalik?: number;
+  /** yalnız Kupon 1: kalabalık kuponlarının durumu */
+  crowd_status?: { available: boolean; reason: string | null };
+}
+
+export interface TotoCouponSlot {
+  kind: TotoKind;
+  title: string;
+  description: string;
+  coupon: TotoCoupon | null;
+  /** kupon yoksa nedeni */
+  reason: string | null;
+}
+
+export interface TotoCrowd {
+  available: boolean;
+  reason: string | null;
+  fetched_at: string | null;
+  tk_name: string | null;
+  source: string;
+  events: ({ event_no: number } & Record<TotoOutcome, number>)[];
+}
+
+export interface TotoKindHistory {
+  settled: number;
+  avg_hits: number | null;
+  best_hits: number | null;
+  total_cost: number;
+  total_prize: number;
 }
 
 export interface TotoWeek {
@@ -792,8 +860,54 @@ export type TotoBacktestResponse =
 
 export interface TotoResponse {
   week: TotoWeek | null;
-  coupon: TotoCoupon | null;
-  pool: { column_price: number; max_column: number; source: "iddaa" | "varsayılan"; budget: number };
-  history: { settled: number; avg_hits: number | null; best_hits: number | null; total_cost: number; total_prize: number };
+  coupons: TotoCouponSlot[];
+  crowd: TotoCrowd | null;
+  /** Kalabalık kuponları (2/3) açık mı (config.TOTO_CROWD_COUPONS); eski statik veride yok */
+  crowd_coupons?: boolean;
+  weekly_cost: number;
+  pool: { column_price: number; max_column: number; source: "iddaa" | "varsayılan"; budget: number; weekly_budget: number };
+  history: { by_kind: Partial<Record<TotoKind, TotoKindHistory>>; total_cost: number; total_prize: number };
   generated_at: string;
 }
+
+/** backend/app/sportoto_crowd.py run_crowd_backtest — tür özeti */
+export interface TotoCrowdBtKind extends TotoBtStrategy {
+  expected_prize: number;
+  expected_roi: number | null;
+  realized_over_expected: number | null;
+  expected_by_tier: Record<string, number>;
+  realized_by_tier: Record<string, number>;
+  p12_expected_weeks: number;
+  p15_expected_weeks: number;
+  avg_columns: number;
+}
+
+export interface TotoCrowdBtWeek {
+  cycle_no: number;
+  program_name: string | null;
+  column_price: number;
+  market: { n_columns: number; pools: Record<string, number>; carry: number; n_weeks: number; blend_a: number; blend_weeks: number };
+  realized_n_eff: number | null;
+  n_by_source: Record<string, number>;
+  coupons: Record<
+    TotoKind,
+    { hits: number; columns: number; cost: number; prize: number; expected_prize: number; p15: number; p12: number; winning_columns: Record<string, number> }
+  >;
+}
+
+export type TotoCrowdBacktestResponse =
+  | { available: false }
+  | {
+      available: true;
+      created_at: string;
+      window: { from_cycle: number | null; to_cycle: number | null; n_weeks: number };
+      columns: number;
+      mc_samples: number;
+      kinds: Record<TotoKind, TotoCrowdBtKind>;
+      combined: { cost: number; prize: number; roi: number | null };
+      n_estimate: { median_ratio_realized_over_est: number | null; n: number };
+      excluded: { cycle_no: number; reason: string | null }[];
+      tk_odds_fallback_events: number;
+      weeks: TotoCrowdBtWeek[];
+      notes: string[];
+    };

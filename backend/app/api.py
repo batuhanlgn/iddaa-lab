@@ -399,6 +399,15 @@ def toto_backtest() -> dict[str, Any]:
             "weeks": [{k: v for k, v in w.items() if k not in ("events", "pools")} for w in r.get("weeks", [])]}
 
 
+@app.get("/api/toto/crowd-backtest")
+def toto_crowd_backtest() -> dict[str, Any]:
+    """Üç kuponun (olasılık / kalabalık / kalabalık-2) backtest özeti; haftalar işaret listesi olmadan."""
+    r = db.meta_get(con(), "toto_crowd_backtest")
+    if not r:
+        return {"available": False}
+    return {"available": True, **r}
+
+
 @app.get("/api/leagues")
 def leagues() -> dict[str, Any]:
     return {"leagues": [{"slug": lg.slug, "name": lg.name, "country": lg.country, "is_cup": lg.is_cup} for lg in LEAGUES]}

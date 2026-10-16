@@ -1,130 +1,19 @@
-import Link from "next/link";
 import { Suspense } from "react";
 import ErrorPanel from "@/components/ErrorPanel";
 import TotoBacktestSection from "@/components/TotoBacktestSection";
-import { EmptyState, PageHeader, SectionTitle, SkeletonRows, Stat } from "@/components/ui";
-import { dateTime, pct, relative } from "@/lib/format";
+import TotoCrowdBacktestSection from "@/components/TotoCrowdBacktestSection";
+import TotoCouponCard from "@/components/toto/TotoCouponCard";
+import TotoMatchBoard from "@/components/toto/TotoMatchBoard";
+import { EmptyState, PageHeader, SkeletonRows } from "@/components/ui";
+import { dateTime, relative } from "@/lib/format";
 import { BackendError, getJSON } from "@/lib/server-api";
-import type { TotoBacktestResponse, TotoCoupon, TotoEvent, TotoOutcome, TotoResponse, TotoSource } from "@/lib/types";
+import type { TotoBacktestResponse, TotoCrowdBacktestResponse, TotoKind, TotoKindHistory, TotoResponse } from "@/lib/types";
 
-const OUTS: TotoOutcome[] = ["1", "0", "2"];
 const tl = new Intl.NumberFormat("tr-TR", { style: "currency", currency: "TRY", maximumFractionDigits: 0 });
 const tl2 = new Intl.NumberFormat("tr-TR", { style: "currency", currency: "TRY", maximumFractionDigits: 2 });
+const mn = new Intl.NumberFormat("tr-TR", { maximumFractionDigits: 1 });
 
-const SOURCE_LABEL: Record<TotoSource, { text: string; title: string }> = {
-  harman: { text: "model + oran", title: "Model olasılığı iddaa oranıyla harmanlandı" },
-  model: { text: "model", title: "iddaa oranı yok; yalnız model" },
-  piyasa: { text: "oran", title: "Model kapsamı dışında; iddaa oranından (marjsız)" },
-  yok: { text: "veri yok", title: "Ne model ne oran bulunabildi; olasılıklar eşit alındı" },
-};
-
-const KIND_STYLE: Record<TotoEvent["kind"], string> = {
-  banko: "border-good/50 text-good-ink",
-  çift: "border-warn/50 text-warn",
-  üçlü: "border-line-strong text-ink-2",
-};
-
-function OutcomeCell({ ev, o }: { ev: TotoEvent; o: TotoOutcome }) {
-  const picked = ev.picks.includes(o);
-  const won = ev.winner === o;
-  return (
-    <td className="px-1 py-1.5 text-center">
-      <span
-        className={`num inline-flex min-w-[3.4rem] flex-col items-center rounded-md border px-1.5 py-1 text-xs ${
-          picked ? "border-accent bg-accent/15 font-semibold text-ink" : "border-line text-ink-2"
-        } ${won ? "ring-2 ring-good" : ""}`}
-        title={`${o === "0" ? "X" : o}: olasılık ${pct(ev.probs[o], 1)}${ev.odds ? ` · iddaa ${ev.odds[o].toFixed(2)}` : ""}`}
-      >
-        <span>
-          {picked ? "✓ " : ""}
-          {o === "0" ? "X" : o}
-        </span>
-        <span className="text-[0.7rem]">{pct(ev.probs[o])}</span>
-      </span>
-      {won && <span className="sr-only">(sonuç)</span>}
-    </td>
-  );
-}
-
-function EventRow({ ev }: { ev: TotoEvent }) {
-  const linkable = ev.match_id !== null && (ev.source === "harman" || ev.source === "model");
-  const name = ev.home && ev.away ? `${ev.home} – ${ev.away}` : ev.event_name;
-  const hit = ev.winner === null ? null : ev.picks.includes(ev.winner);
-  return (
-    <tr className="border-b border-line/60 last:border-0">
-      <td className="num px-2 py-1.5 text-center text-sm font-semibold">{ev.event_no}</td>
-      <td className="px-2 py-1.5">
-        <div className="min-w-0">
-          {linkable ? (
-            <Link href={`/mac/${ev.match_id}`} className="block truncate text-sm font-medium hover:underline">
-              {name}
-            </Link>
-          ) : (
-            <span className="block truncate text-sm font-medium">{name}</span>
-          )}
-          <span className="text-[0.7rem] text-muted">
-            {dateTime(ev.kickoff_utc)} · {ev.league_name ?? ev.competition} ·{" "}
-            <span title={SOURCE_LABEL[ev.source].title} className={ev.source === "yok" ? "text-critical-ink" : ""}>
-              {SOURCE_LABEL[ev.source].text}
-            </span>
-            {ev.confidence === "düşük" && <span className="text-warn"> · düşük güven</span>}
-          </span>
-        </div>
-      </td>
-      {OUTS.map((o) => (
-        <OutcomeCell key={o} ev={ev} o={o} />
-      ))}
-      <td className="px-2 py-1.5 text-center">
-        <span className={`inline-block rounded border px-1.5 py-0.5 text-[0.7rem] font-medium ${KIND_STYLE[ev.kind]}`}>{ev.kind}</span>
-      </td>
-      <td className="num px-2 py-1.5 text-right text-xs">
-        {ev.result ? (
-          <span className={hit ? "text-good-ink" : "text-critical-ink"}>
-            {hit ? "✓" : "✗"} {ev.result}
-          </span>
-        ) : (
-          <span className="text-muted">{pct(ev.cover)}</span>
-        )}
-      </td>
-    </tr>
-  );
-}
-
-function CouponSummary({ c }: { c: TotoCoupon }) {
-  // Bayi formundaki sıra: 1, X, 2
-  const code = c.events
-    .map((e) => `${e.event_no}: ${OUTS.filter((o) => e.picks.includes(o)).map((o) => (o === "0" ? "X" : o)).join("")}`)
-    .join(" · ");
-  return (
-    <section className="panel rise p-5">
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <Stat label="Kolon" value={<span className="num">{c.columns}</span>} sub={`${c.column_price} TL / kolon`} />
-        <Stat label="Tutar" value={<span className="num">{tl.format(c.cost)}</span>} sub={`bütçe ${tl.format(c.budget)}`} />
-        <Stat label="15 bilme" value={<span className="num">{pct(c.p15, 2)}</span>} sub={`en az 12: ${pct(c.p_at_least["12"] ?? 0)}`} />
-        <Stat
-          label="Beklenen doğru"
-          value={<span className="num">{c.expected_hits.toFixed(1)}</span>}
-          sub={`en az 13: ${pct(c.p_at_least["13"] ?? 0)} · 14: ${pct(c.p_at_least["14"] ?? 0, 1)}`}
-        />
-      </div>
-      <div className="mt-4 rounded-lg bg-surface-2 px-3 py-2">
-        <p className="kicker mb-1">Kupon (bayide doldurmak için)</p>
-        <p className="num break-words text-sm">{code}</p>
-      </div>
-      <p className="mt-3 text-[0.7rem] text-muted">
-        {c.locked ? "🔒 Kilitli: kapanıştan önceki son hali." : `Kapanıştan 1 saat önce kilitlenir; o zamana kadar her güncellemede yenilenir (son: ${relative(c.updated_at)}).`}{" "}
-        {c.pool_source === "varsayılan" && "Kolon bedeli canlı ayardan okunamadı; bilinen son değer (10 TL) kullanıldı. "}
-        Kupon, bütçe içinde 15 maçı da bilme olasılığını en büyütür: belirsiz maçlara çift/üçlü, net maçlara banko. Oynanma
-        oranları (ikramiyenin kaç kişiyle paylaşılacağı) hesaba katılmaz.
-      </p>
-      {c.n_no_data > 0 && (
-        <p className="mt-2 text-xs text-critical-ink">
-          ⚠ {c.n_no_data} maç için ne model ne oran bulunabildi; bu maçlarda olasılıklar eşit alındı.
-        </p>
-      )}
-    </section>
-  );
-}
+const KIND_NAME: Record<TotoKind, string> = { olasilik: "Kupon 1", kalabalik: "Kupon 2", kalabalik_2: "Kupon 3" };
 
 async function Toto() {
   let data: TotoResponse;
@@ -133,7 +22,7 @@ async function Toto() {
   } catch (e) {
     return <ErrorPanel message={e instanceof BackendError ? e.message : "Spor Toto verisi alınamadı."} />;
   }
-  const { week, coupon, history } = data;
+  const { week, coupons, crowd, history, pool } = data;
   if (!week) {
     return (
       <EmptyState title="Spor Toto programı yok">
@@ -141,6 +30,11 @@ async function Toto() {
       </EmptyState>
     );
   }
+  const anyCoupon = coupons.some((s) => s.coupon !== null);
+  const market = coupons.find((s) => s.coupon?.market)?.coupon?.market;
+  const settledKinds = (Object.entries(history.by_kind) as [TotoKind, TotoKindHistory | undefined][]).filter(
+    (e): e is [TotoKind, TotoKindHistory] => e[1] !== undefined && e[1].settled > 0,
+  );
   return (
     <div className="flex flex-col gap-6">
       <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm text-ink-2">
@@ -150,55 +44,72 @@ async function Toto() {
         <span>
           Son oynama: <b className="num text-ink">{dateTime(week.payin_end_utc)}</b>
         </span>
-        {coupon?.status === "settled" && coupon.hits !== null && (
-          <span className={coupon.hits >= 12 ? "text-good-ink" : ""}>
-            Sonuç: <b className="num">{coupon.hits}/15</b> · ikramiye <b className="num">{tl2.format(coupon.prize ?? 0)}</b>
-          </span>
-        )}
+        <span>
+          Haftalık toplam: <b className="num text-ink">{tl.format(data.weekly_cost)}</b>{" "}
+          <span className="text-muted">/ en fazla {tl.format(pool.weekly_budget)}</span>
+        </span>
       </div>
 
-      {coupon ? (
+      {data.crowd_coupons && crowd && !crowd.available && (
+        <div className="rounded-lg border border-warn/50 bg-warn/10 px-4 py-3 text-sm text-warn" role="status">
+          ⚠ Kalabalık (oynanma oranı) verisi yok: {crowd.reason ?? "kaynak erişilemedi"} Kupon 2 ve 3 bu hafta kurulmadı; Kupon 1 her
+          durumda kurulur.
+        </div>
+      )}
+
+      {anyCoupon ? (
         <>
-          <CouponSummary c={coupon} />
-          <section className="rise">
-            <SectionTitle right={<span className="kicker">✓ = işaretli · çerçeve = sonuç</span>}>15 maç</SectionTitle>
-            <div className="panel overflow-x-auto">
-              <table className="w-full min-w-[640px]">
-                <thead className="text-xs text-muted">
-                  <tr className="border-b border-line">
-                    <th className="px-2 py-2 font-medium">#</th>
-                    <th className="px-2 py-2 text-left font-medium">Maç</th>
-                    <th className="px-1 py-2 font-medium">1</th>
-                    <th className="px-1 py-2 font-medium">X</th>
-                    <th className="px-1 py-2 font-medium">2</th>
-                    <th className="px-2 py-2 font-medium">Tür</th>
-                    <th className="px-2 py-2 text-right font-medium" title="İşaretlenen sonuçların toplam olasılığı">
-                      Kapsama
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {coupon.events.map((ev) => (
-                    <EventRow key={ev.event_no} ev={ev} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </section>
+          <div className={`grid gap-4 ${coupons.length > 1 ? "lg:grid-cols-3" : ""}`}>
+            {coupons.map((s) => (
+              <TotoCouponCard key={s.kind} slot={s} />
+            ))}
+          </div>
+          <TotoMatchBoard slots={coupons} />
+          <div className="flex flex-col gap-1 text-[0.7rem] text-muted">
+            <p>
+              Kuponlar kapanıştan 1 saat önce ayrı ayrı kilitlenir; o zamana kadar her güncellemede en taze olasılıklar ve oynanma
+              oranlarıyla yeniden kurulur. {pool.source === "varsayılan" && "Kolon bedeli canlı ayardan okunamadı; bilinen son değer (10 TL) kullanıldı."}
+            </p>
+            {crowd?.available && (
+              <p>
+                Oynanma oranı: {crowd.source}
+                {crowd.tk_name ? ` · ${crowd.tk_name}` : ""} · son okuma {relative(crowd.fetched_at)}. Beklenen ikramiye: sonuçlar
+                bizim olasılıklarımızla, kalabalığın kolonları oynanma oranlarıyla bağımsız sayılarak hesaplanır; kazanan kolon başına
+                ödeme = havuz × E[1/(1+diğer kazananlar)].
+              </p>
+            )}
+            {market && (
+              <p>
+                Tahmin (yalnız önceki {market.n_weeks} haftadan): etkin kalabalık{" "}
+                <span className="num">{mn.format(market.n_columns / 1e6)} milyon</span> kolon · havuz 15:{" "}
+                <span className="num">{tl.format(market.pools["15"] ?? 0)}</span>
+                {market.carry > 0 && <> (devir {tl.format(market.carry)} dahil)</>} · 14: <span className="num">{tl.format(market.pools["14"] ?? 0)}</span> · 13:{" "}
+                <span className="num">{tl.format(market.pools["13"] ?? 0)}</span> · 12: <span className="num">{tl.format(market.pools["12"] ?? 0)}</span> ·
+                sonuç olasılığı bizim olasılık<sup>a</sup> × oynanma<sup>1−a</sup>, a = <span className="num">{market.blend_a.toFixed(1)}</span>{" "}
+                {`(${market.blend_weeks} haftadan; bizim model kalabalığı şaşırtan sonuçları gerçekte olduğundan sık görüyor)`}
+                {market.notes.length > 0 && ` · ${market.notes.join(" · ")}`}
+              </p>
+            )}
+          </div>
         </>
       ) : (
         <EmptyState title="Bu hafta kupon üretilmedi">
-          Program alındı ama kupon, kapanış geçtiği için ya da güncelleme o saatte çalışmadığı için kurulamadı.
+          {coupons[0]?.reason ?? "Program alındı ama kupon, kapanış geçtiği için ya da güncelleme o saatte çalışmadığı için kurulamadı."}
         </EmptyState>
       )}
 
-      {history.settled > 0 && (
-        <p className="text-xs text-muted">
-          Sonuçlanan {history.settled} hafta · ortalama doğru{" "}
-          <span className="num">{(history.avg_hits ?? 0).toFixed(1)}</span> · en iyi <span className="num">{history.best_hits}</span> · toplam
-          maliyet <span className="num">{tl.format(history.total_cost)}</span> · toplam ikramiye{" "}
-          <span className="num">{tl2.format(history.total_prize)}</span>
-        </p>
+      {settledKinds.length > 0 && (
+        <ul className="flex flex-col gap-0.5 text-xs text-muted">
+          {settledKinds.map(([k, h]) => {
+            return (
+              <li key={k}>
+                {KIND_NAME[k]}: sonuçlanan {h.settled} hafta · ortalama doğru <span className="num">{(h.avg_hits ?? 0).toFixed(1)}</span> · en
+                iyi <span className="num">{h.best_hits}</span> · maliyet <span className="num">{tl.format(h.total_cost)}</span> · ikramiye{" "}
+                <span className="num">{tl2.format(h.total_prize)}</span>
+              </li>
+            );
+          })}
+        </ul>
       )}
     </div>
   );
@@ -223,13 +134,36 @@ async function TotoBacktest() {
   return <TotoBacktestSection bt={bt} />;
 }
 
+async function TotoCrowdBacktest() {
+  let bt: TotoCrowdBacktestResponse;
+  try {
+    bt = await getJSON<TotoCrowdBacktestResponse>("/api/toto/crowd-backtest");
+  } catch (e) {
+    if (e instanceof BackendError && e.status === 404) return null;
+    return <ErrorPanel message={e instanceof BackendError ? e.message : "Üç kupon backtest sonucu alınamadı."} />;
+  }
+  if (!bt.available) {
+    return (
+      <EmptyState title="Üç kupon backtest'i henüz çalışmadı">
+        Kalabalık kuponlarının geçmiş sınaması haftalık backtest işinde, Spor Toto backtest&apos;inden sonra çalışır.
+      </EmptyState>
+    );
+  }
+  return <TotoCrowdBacktestSection bt={bt} />;
+}
+
 export default function TotoPage() {
   return (
     <>
-      <PageHeader kicker="Haftalık · en fazla 3.000 TL" title="Spor Toto" />
+      <PageHeader kicker="Haftalık · 3 kupon · her biri en fazla 3.000 TL" title="Spor Toto" />
       <Suspense fallback={<SkeletonRows n={8} h={48} />}>
         <Toto />
       </Suspense>
+      <div className="mt-10">
+        <Suspense fallback={<SkeletonRows n={4} h={48} />}>
+          <TotoCrowdBacktest />
+        </Suspense>
+      </div>
       <div className="mt-10">
         <Suspense fallback={<SkeletonRows n={4} h={48} />}>
           <TotoBacktest />
