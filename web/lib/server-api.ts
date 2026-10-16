@@ -20,6 +20,8 @@ const STATIC_ROUTES: [RegExp, (m: RegExpMatchArray) => string][] = [
   [/^\/api\/status$/, () => "status.json"],
   [/^\/api\/coverage$/, () => "coverage.json"],
   [/^\/api\/live\/base$/, () => "live_base.json"],
+  [/^\/api\/standings$/, () => "standings.json"],
+  [/^\/api\/toto$/, () => "toto.json"],
 ];
 
 function readStatic<T>(pathname: string): T {

@@ -140,3 +140,16 @@ SURPRISE_MAX_EDGE = 1.60      # p_model <= 1.60 * p_piyasa (aşırı ayrışma =
 SURPRISE_MIN_EV = 0.05
 PLAYER_PICK_MIN_START = 0.85
 MIN_SELECTION_ODDS = 1.20
+
+# Karşılıklı geçmiş (maç sayfası): gösterilecek maç sayısı; eksikse ESPN takım fikstüründen kaç sezon geriye gidilir
+H2H_LIMIT = 5
+H2H_MAX_SEASONS_BACK = 8
+H2H_MAX_REQUESTS = 400  # iş başına üst sınır (ilk doldurma birkaç güncellemeye yayılır)
+
+# Spor Toto (kullanıcı tercihi, 16 Eki 2026: haftalık kupon en fazla 3.000 TL)
+TOTO_BUDGET_TL = 3000.0
+TOTO_LOCK_MINUTES = 60  # kapanıştan bu kadar önce kupon kilitlenir (son resmi ilk 11'ler dahil edilmiş olur)
+# Kolon bedeli/sınırı iddaa uygulama ayarından okunur (appconfig soccerPool); hiç okunamadıysa 16 Eki 2026'da
+# doğrulanan değerler kullanılır ve arayüzde "varsayılan" diye belirtilir.
+TOTO_DEFAULT_COLUMN_PRICE = 10.0
+TOTO_DEFAULT_MAX_COLUMN = 2500

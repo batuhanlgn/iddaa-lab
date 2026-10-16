@@ -38,6 +38,9 @@ ve ilerleme **Veri** sayfasında görünür. Uygulama açıkken veriler kendili�
 |---|---|---|
 | ESPN `site.api.espn.com` | Fikstür, sonuç, takım istatistikleri (şut, isabet, korner), oyuncu istatistikleri, gol dakikaları, kadrolar | 47 lig/kupa; anahtarsız |
 | iddaa.com `sportsbookv2.iddaa.com` | Güncel iddaa oranları, MBS | ~1.100 futbol maçı; her değişiklik arşivlenir |
+| ESPN `apis/v2/.../standings` | Lig puan durumu (resmi tablo: puan silme, bölge notları, konferans/grup) | 39 lig; 15 dakikada bir |
+| ESPN `all/teams/{id}/schedule` | Karşılıklı geçmiş için eski sezon maçları | Ayrı tabloda (`h2h_history`); model eğitimi kullanmaz |
+| iddaa.com `sportotov2.iddaa.com` + `contentv2.iddaa.com/appconfig` | Spor Toto programı, sonuçlar, ikramiyeler; kolon bedeli ve kupon başına kolon sınırı | Anahtarsız |
 
 ## Model (Claude ↔ Codex ortak kararı, `docs/`)
 
@@ -64,6 +67,16 @@ ve ilerleme **Veri** sayfasında görünür. Uygulama açıkken veriler kendili�
 - Maç başına tek seçim yapılır ve MBS kuralı uygulanır.
 - Değer yoksa kupon üretilmez.
 - Her kupon arşivlenir. Maçlar bitince otomatik sonuçlandırılır ve gerçek isabet ile ROI **Performans** sayfasında izlenir.
+
+## Spor Toto
+
+- Her hafta iddaa Spor Toto servisinden 15 maç alınır; maçlar iddaa bülteni ve ESPN ile eşleştirilir.
+- Maç olasılığı: model+oran harmanı → model → iddaa oranı (marjsız) → bilgi yoksa eşit (arayüzde uyarılır).
+- Kupon **en fazla 3.000 TL** (`TOTO_BUDGET_TL`). Her maça 1, 2 ya da 3 işaret; kolon = Π işaret, maliyet = kolon × kolon bedeli.
+  Bütçe ve kolon sınırı içinde 15'i de bilme olasılığını en büyüten seçim kesin DP ile bulunur.
+- Kupon kapanıştan 1 saat önce kilitlenir; sonuç açıklanınca isabet, kazanan kolon sayıları (12–15) ve ikramiye
+  `toto_coupons` tablosunda saklanır.
+- Oynanma oranları (ikramiyenin paylaşımı) resmi kaynakta olmadığı için hesaba katılmaz.
 
 ## Bilinen sınırlar
 

@@ -7,7 +7,9 @@ const LINKS = [
   { href: "/", label: "Bülten" },
   { href: "/canli", label: "Canlı" },
   { href: "/kuponlar", label: "Kuponlar" },
+  { href: "/spor-toto", label: "Spor Toto" },
   { href: "/oyuncular", label: "Oyuncular" },
+  { href: "/puan-durumu", label: "Puan Durumu" },
   { href: "/performans", label: "Performans" },
   { href: "/veri", label: "Veri" },
 ] as const;

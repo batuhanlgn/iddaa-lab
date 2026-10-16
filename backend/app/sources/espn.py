@@ -422,3 +422,82 @@ def slim_summary(payload: dict[str, Any]) -> dict[str, Any]:
     """Ham yanıtın modele/denetime gereken kısmı (boyutu ~10 kat küçültür)."""
     keep = ("header", "boxscore", "rosters", "keyEvents", "gameInfo")
     return {k: payload.get(k) for k in keep if k in payload}
+
+
+ESPN_STANDINGS_BASE = ESPN_BASE.replace("/apis/site/v2/", "/apis/v2/")
+_STANDING_STATS = {
+    "gamesPlayed": "played", "wins": "won", "ties": "drawn", "losses": "lost", "pointsFor": "gf",
+    "pointsAgainst": "ga", "pointDifferential": "gd", "points": "points", "deductions": "deductions", "rank": "rank",
+}
+
+
+async def fetch_standings(client: PoliteClient, league: str) -> dict[str, Any]:
+    return await client.get_json(f"{ESPN_STANDINGS_BASE}/{league}/standings")
+
+
+def parse_standings(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Puan durumu: grup başına (MLS konferansı, Arjantin grubu, ŞL lig aşaması...) sıralı satırlar.
+    Puan silme, sıralama ve not (Avrupa/küme düşme bölgesi) ESPN'in resmi tablosundan gelir; yeniden hesaplanmaz."""
+    groups = []
+    for ch in payload.get("children") or []:
+        entries = []
+        for e in (ch.get("standings") or {}).get("entries") or []:
+            t = e.get("team") or {}
+            if not t.get("id"):
+                continue
+            st = {_STANDING_STATS[s["name"]]: _int(s.get("value")) for s in e.get("stats") or [] if s.get("name") in _STANDING_STATS}
+            note = e.get("note") or None
+            entries.append({
+                "team_id": str(t["id"]),
+                "name": t.get("displayName") or t.get("name") or str(t["id"]),
+                "abbreviation": t.get("abbreviation"),
+                "logo": ((t.get("logos") or [{}])[0]).get("href"),
+                **{k: st.get(k) for k in _STANDING_STATS.values()},
+                "note": {"color": note.get("color"), "description": note.get("description")} if note else None,
+            })
+        if not entries:
+            continue
+        entries.sort(key=lambda x: (x["rank"] is None, x["rank"] or 0))
+        groups.append({"name": ch.get("name") or "", "entries": entries})
+    if not groups:
+        return None
+    season = payload.get("season") or {}
+    return {"season": season.get("displayName"), "season_year": _int(season.get("year")), "groups": groups}
+
+
+async def fetch_team_schedule(client: PoliteClient, team_id: str, season: int) -> dict[str, Any]:
+    """Takımın bir sezondaki TÜM maçları (lig + kupa + Avrupa)."""
+    return await client.get_json(f"{ESPN_BASE}/all/teams/{team_id}/schedule", {"season": str(season)})
+
+
+def _score(v: Any) -> int | None:
+    if isinstance(v, dict):
+        return _int(v.get("value") if v.get("value") is not None else v.get("displayValue"))
+    return _int(v)
+
+
+def parse_team_schedule(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Takım fikstüründen yalnız tamamlanmış maçlar (karşılıklı geçmiş için)."""
+    out = []
+    for ev in payload.get("events") or []:
+        comp = (ev.get("competitions") or [{}])[0]
+        st = (comp.get("status") or ev.get("status") or {}).get("type") or {}
+        if not st.get("completed"):
+            continue
+        sides = {c.get("homeAway"): c for c in comp.get("competitors") or []}
+        if "home" not in sides or "away" not in sides:
+            continue
+        h, a = sides["home"], sides["away"]
+        hg, ag = _score(h.get("score")), _score(a.get("score"))
+        if hg is None or ag is None:
+            continue
+        league = ev.get("league") if isinstance(ev.get("league"), dict) else {}
+        out.append({
+            "id": str(ev["id"]), "date_utc": norm_iso(ev["date"]),
+            "league": league.get("slug") or "", "league_name": league.get("name") or league.get("abbreviation") or "",
+            "home_id": str(h["team"]["id"]), "away_id": str(a["team"]["id"]),
+            "home_name": h["team"].get("displayName") or h["team"].get("name") or "",
+            "away_name": a["team"].get("displayName") or a["team"].get("name") or "",
+            "home_goals": hg, "away_goals": ag, "extra_time": is_extra_time(st),
+        })
+    return out

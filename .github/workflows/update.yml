@@ -11,7 +11,7 @@ on:
       job:
         description: "Çalıştırılacak iş"
         type: choice
-        options: [auto, refresh, lineups, odds, backtest, lineup_beta]
+        options: [auto, refresh, lineups, odds, backtest, lineup_beta, league_info]
         default: auto
       delay:
         description: "Başlamadan önce bekleme (sn) — yedek zincir için"

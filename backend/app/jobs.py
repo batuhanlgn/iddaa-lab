@@ -80,6 +80,13 @@ def _finish_cycle(con, progress: Progress) -> None:
     except Exception as e:  # noqa: BLE001 - canlı kaynak hatası ana güncellemeyi durdurmasın
         log.exception("Canlı öneri kaydı başarısız")
         progress(f"UYARI: canlı öneriler kaydedilemedi ({type(e).__name__}: {e})")
+    try:
+        from .sportoto import ingest_toto
+
+        asyncio.run(ingest_toto(con, progress))
+    except Exception as e:  # noqa: BLE001 - Spor Toto kaynağı hatası ana güncellemeyi durdurmasın
+        log.exception("Spor Toto güncellenemedi")
+        progress(f"UYARI: Spor Toto güncellenemedi ({type(e).__name__}: {e})")
     progress(f"Kupon sonuçlandırma: {coupons.settle(con)}")
     progress(f"Öneri/CLV takibi: {update_tracking(con)}")
     gen = coupons.generate(con, days=3, archive=True)
@@ -107,15 +114,40 @@ def do_lineups(con, progress: Progress) -> None:
     """Saatlik: yaklaşan maçların (36 saat) özetlerinden resmi kadrolar + güncel oranlar -> yeniden tahmin ve kupon."""
     _prepare(con, progress)
     asyncio.run(ingest_summaries(con, progress, pre_only=True))
+    _standings_safe(con, progress)
     _iddaa_safe(con, progress)
     progress(f"Eşleştirme: {match_iddaa_events(con)}")
     _predict(con, progress)
     _finish_cycle(con, progress)
 
 
+def _standings_safe(con, progress: Progress) -> None:
+    """15 dakikalık işte yalnız puan durumu (~50 istek): maç günü tablo güncel kalsın."""
+    from .league_info import ingest_standings
+
+    try:
+        asyncio.run(ingest_standings(con, progress))
+    except Exception as e:  # noqa: BLE001 - görüntüleme verisi; ana işi durdurmaz
+        log.exception("Puan durumu başarısız")
+        progress(f"UYARI: puan durumu alınamadı ({type(e).__name__}: {e})")
+
+
+def _league_info_safe(con, progress: Progress) -> None:
+    """Puan durumu + karşılıklı geçmiş: yalnız görüntüleme verisi; hata ana güncellemeyi durdurmaz."""
+    from .league_info import ingest_h2h, ingest_standings
+
+    for step in (ingest_standings, ingest_h2h):
+        try:
+            asyncio.run(step(con, progress))
+        except Exception as e:  # noqa: BLE001 - kaynak hatası iş kaydına yazılır, diğer adımlar sürer
+            log.exception("%s başarısız", step.__name__)
+            progress(f"UYARI: {step.__name__} tamamlanamadı ({type(e).__name__}: {e})")
+
+
 def do_refresh(con, progress: Progress) -> None:
     asyncio.run(ingest_scoreboards(con, progress, months_back=2))
     asyncio.run(ingest_summaries(con, progress))
+    _league_info_safe(con, progress)
     _prepare(con, progress)
     _iddaa_safe(con, progress)
     progress(f"Eşleştirme: {match_iddaa_events(con)}")
@@ -151,6 +183,7 @@ COMMANDS: dict[str, Callable[[object, Progress], None]] = {
     "lineups": do_lineups,
     "lineup_beta": lambda con, pr: __import__("app.backtest", fromlist=["tune_lineup_beta"]).tune_lineup_beta(con, pr) and None,
     "backtest": do_backtest,
+    "league_info": _league_info_safe,
     "ingest": lambda con, pr: (asyncio.run(ingest_scoreboards(con, pr)), asyncio.run(ingest_summaries(con, pr)),
                                asyncio.run(ingest_iddaa(con, pr))) and None,
 }

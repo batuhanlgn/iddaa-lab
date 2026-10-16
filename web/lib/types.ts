@@ -240,6 +240,70 @@ export interface MatchDetail {
   sim?: Simulation;
   odds_history_ms: { outcome_no: number; odd: number; fetched_at: string }[];
   form: Record<"home" | "away", FormMatch[]>;
+  /** Güncellemeden önce dışa aktarılmış eski statik veride bulunmayabilir */
+  standings?: MatchStandings | null;
+  h2h?: H2HMatch[];
+}
+
+// ---------------------------------------------------------------- puan durumu ve karşılıklı geçmiş
+
+export interface StandingEntry {
+  team_id: string;
+  name: string;
+  abbreviation: string | null;
+  logo: string | null;
+  played: number | null;
+  won: number | null;
+  drawn: number | null;
+  lost: number | null;
+  gf: number | null;
+  ga: number | null;
+  gd: number | null;
+  points: number | null;
+  deductions: number | null;
+  rank: number | null;
+  note: { color: string | null; description: string | null } | null;
+}
+
+export interface StandingsGroup {
+  name: string;
+  entries: StandingEntry[];
+}
+
+export interface LeagueStandings {
+  slug: string;
+  name: string;
+  country: string;
+  is_cup: boolean;
+  season: string | null;
+  season_year: number | null;
+  groups: StandingsGroup[];
+  fetched_at: string;
+}
+
+export interface StandingsResponse {
+  leagues: LeagueStandings[];
+}
+
+export interface MatchStandings {
+  season: string | null;
+  group: string;
+  entries: StandingEntry[];
+  fetched_at: string | null;
+}
+
+export interface H2HMatch {
+  id: string;
+  date_utc: string;
+  league: string;
+  league_name: string;
+  home_id: string;
+  away_id: string;
+  home_name: string;
+  away_name: string;
+  home_goals: number;
+  away_goals: number;
+  extra_time: boolean;
 }
 
 export interface Selection {
@@ -523,4 +587,69 @@ export interface CoverageLeague {
 
 export interface CoverageResponse {
   leagues: CoverageLeague[];
+}
+
+// ---------------------------------------------------------------- Spor Toto (backend/app/sportoto.py toto_view)
+
+export type TotoOutcome = "1" | "0" | "2";
+export type TotoSource = "harman" | "model" | "piyasa" | "yok";
+
+export interface TotoEvent {
+  event_no: number;
+  event_name: string;
+  home: string | null;
+  away: string | null;
+  competition: string;
+  kickoff_utc: string | null;
+  picks: TotoOutcome[];
+  cover: number;
+  kind: "banko" | "çift" | "üçlü";
+  source: TotoSource;
+  probs: Record<TotoOutcome, number>;
+  confidence: Confidence | null;
+  match_id: string | null;
+  league_name: string | null;
+  odds: Record<TotoOutcome, number> | null;
+  model: Record<TotoOutcome, number> | null;
+  market: Record<TotoOutcome, number> | null;
+  result: string | null;
+  winner: TotoOutcome | null;
+}
+
+export interface TotoCoupon {
+  cycle_no: number;
+  budget: number;
+  column_price: number;
+  max_column: number;
+  pool_source: "iddaa" | "varsayılan";
+  columns: number;
+  cost: number;
+  p15: number;
+  p_at_least: Record<string, number>;
+  expected_hits: number;
+  events: TotoEvent[];
+  n_no_data: number;
+  locked: boolean;
+  updated_at: string;
+  status: "open" | "settled";
+  hits: number | null;
+  prize: number | null;
+}
+
+export interface TotoWeek {
+  cycle_no: number;
+  program_name: string | null;
+  payin_begin_utc: string | null;
+  payin_end_utc: string;
+  dividends: { tier: number; winners: number; amount: number }[] | null;
+  status: "open" | "settled";
+  fetched_at: string;
+}
+
+export interface TotoResponse {
+  week: TotoWeek | null;
+  coupon: TotoCoupon | null;
+  pool: { column_price: number; max_column: number; source: "iddaa" | "varsayılan"; budget: number };
+  history: { settled: number; avg_hits: number | null; best_hits: number | null; total_cost: number; total_prize: number };
+  generated_at: string;
 }

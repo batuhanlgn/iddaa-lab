@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import ErrorPanel from "@/components/ErrorPanel";
 import IddaaMarkets from "@/components/match/IddaaMarkets";
+import LeagueContext from "@/components/match/LeagueContext";
 import MatchHeader from "@/components/match/MatchHeader";
 import ModelNotes from "@/components/match/ModelNotes";
 import Outcomes from "@/components/match/Outcomes";
@@ -35,6 +36,9 @@ async function MatchData({ params }: Pick<PageProps<"/mac/[id]">, "params">) {
       <>
         <MatchHeader d={d} />
         <EmptyState title="Model kapsamı dışında">{d.coverage_note ?? "Bu maç için model tahmini üretilemedi."}</EmptyState>
+        <div className="mt-6">
+          <LeagueContext d={d} />
+        </div>
       </>
     );
   }
@@ -73,6 +77,8 @@ async function MatchData({ params }: Pick<PageProps<"/mac/[id]">, "params">) {
           <EmptyState title="Simülasyon yok">Bu maç için şut verisi yetersiz olduğundan oyuncu simülasyonu çalıştırılmadı.</EmptyState>
         )}
       </section>
+
+      <LeagueContext d={d} />
 
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
         <SideInfo d={d} />

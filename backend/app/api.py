@@ -274,6 +274,10 @@ def match_detail(match_id: str) -> dict[str, Any]:
         ).fetchall()
         form[side] = [{**dict(x), "is_home": x["home_id"] == tid} for x in rows]
     p["form"] = form
+    from .league_info import head_to_head, match_standings
+
+    p["standings"] = match_standings(c, m["league"], m["home"]["id"], m["away"]["id"])
+    p["h2h"] = head_to_head(c, m["home"]["id"], m["away"]["id"], m["date_utc"])
     return p
 
 
@@ -376,6 +380,20 @@ def live_base_endpoint() -> dict[str, Any]:
     from .live import live_base
 
     return live_base(con())
+
+
+@app.get("/api/standings")
+def standings() -> dict[str, Any]:
+    from .league_info import all_standings
+
+    return all_standings(con())
+
+
+@app.get("/api/toto")
+def toto() -> dict[str, Any]:
+    from .sportoto import toto_view
+
+    return toto_view(con())
 
 
 @app.get("/api/leagues")

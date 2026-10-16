@@ -208,6 +208,64 @@ CREATE TABLE IF NOT EXISTS job_runs (
     status TEXT NOT NULL,             -- running | ok | error
     message TEXT
 );
+
+-- Karşılıklı geçmiş için eski sezon maçları (ESPN takım fikstüründen); model eğitimi bu tabloyu kullanmaz
+CREATE TABLE IF NOT EXISTS h2h_history (
+    id TEXT PRIMARY KEY,
+    date_utc TEXT NOT NULL,
+    league TEXT NOT NULL,
+    league_name TEXT,
+    home_id TEXT NOT NULL,
+    away_id TEXT NOT NULL,
+    home_name TEXT,
+    away_name TEXT,
+    home_goals INTEGER NOT NULL,
+    away_goals INTEGER NOT NULL,
+    extra_time INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS ix_h2h_pair ON h2h_history(home_id, away_id, date_utc);
+
+-- Spor Toto: hafta, 15 maç (sonuçlarıyla) ve haftalık kupon (sonuç + kazanan kolonlar + ikramiye)
+CREATE TABLE IF NOT EXISTS toto_weeks (
+    cycle_no INTEGER PRIMARY KEY,
+    program_name TEXT,
+    payin_begin_utc TEXT,
+    payin_end_utc TEXT NOT NULL,
+    dividends TEXT,                   -- JSON [{tier, winners, amount}]
+    status TEXT NOT NULL DEFAULT 'open',  -- open | settled
+    fetched_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS toto_events (
+    cycle_no INTEGER NOT NULL,
+    event_no INTEGER NOT NULL,
+    event_name TEXT NOT NULL,
+    home TEXT,
+    away TEXT,
+    competition TEXT,
+    kickoff_utc TEXT,
+    espn_match_id TEXT,
+    iddaa_event_id INTEGER,
+    result TEXT,
+    winner TEXT,                      -- 1 | 0 | 2 (90 dakika)
+    PRIMARY KEY (cycle_no, event_no)
+);
+CREATE TABLE IF NOT EXISTS toto_coupons (
+    cycle_no INTEGER PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    locked INTEGER NOT NULL DEFAULT 0,
+    budget REAL NOT NULL,
+    column_price REAL NOT NULL,
+    columns INTEGER NOT NULL,
+    cost REAL NOT NULL,
+    p15 REAL NOT NULL,
+    payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',  -- open | settled
+    hits INTEGER,
+    winning_columns TEXT,             -- JSON {"15": n, "14": n, ...}
+    prize REAL,
+    settled_at TEXT
+);
 """
 
 _local = threading.local()
