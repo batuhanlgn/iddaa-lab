@@ -225,6 +225,16 @@ CREATE TABLE IF NOT EXISTS h2h_history (
 );
 CREATE INDEX IF NOT EXISTS ix_h2h_pair ON h2h_history(home_id, away_id, date_utc);
 
+-- Maç başı beklenen gol (Understat; ESPN maçına lig + tarih + ad benzerliği + skor ile bağlanır)
+CREATE TABLE IF NOT EXISTS match_xg (
+    match_id TEXT PRIMARY KEY,        -- ESPN maç kimliği
+    xg_home REAL NOT NULL,
+    xg_away REAL NOT NULL,
+    source TEXT NOT NULL,             -- understat
+    source_id TEXT,                   -- kaynağın maç kimliği
+    fetched_at TEXT NOT NULL
+);
+
 -- Spor Toto: hafta, 15 maç (sonuçlarıyla) ve haftalık kupon (sonuç + kazanan kolonlar + ikramiye)
 CREATE TABLE IF NOT EXISTS toto_weeks (
     cycle_no INTEGER PRIMARY KEY,

@@ -206,6 +206,7 @@ class GoalModel:
     alpha: float = 1.0
     cal_t: float = 1.0
     cal_g: float = 1.0
+    xg_weight: float = 0.0
 
     def matrix(self, lh: float, la: float) -> np.ndarray:
         return score_matrix_cal(lh, la, self.rho, self.cal_t, self.cal_g)
@@ -282,14 +283,70 @@ def sot_composite(con: sqlite3.Connection, matches: list[MatchRecord], before: s
     return out
 
 
+def load_xg(con: sqlite3.Connection, before: str) -> dict[str, tuple[float, float]]:
+    """Kesimden önce oynanmış maçların xG'si (maç id -> (ev, dep)). Tablo yoksa (eski kurulum) boş."""
+    try:
+        rows = con.execute(
+            """SELECT x.match_id, x.xg_home, x.xg_away FROM match_xg x JOIN matches m ON m.id=x.match_id
+               WHERE m.completed=1 AND m.date_utc < ?""",
+            (before,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {}
+    return {r[0]: (float(r[1]), float(r[2])) for r in rows}
+
+
+def xg_composite(con: sqlite3.Connection, matches: list[MatchRecord], before: str, alpha: float, xg_weight: float,
+                 prior_k: float = 300.0) -> dict[str, tuple[float, float]] | None:
+    """Gol / isabetli şut karışımına xG eklenmiş hedef.
+
+    xG'li maçta: y = (1-w)·[α·gol + (1-α)·dönüşüm·isabetli_şut] + w·ölçek_lig·xG   (w = xg_weight)
+    xG'siz maçta hedef sot_composite ile aynıdır. Lig ölçeği (gol / xG) yalnızca kesim öncesi xG'li maçlardan ve genel
+    orana büzülerek hesaplanır (Understat xG'si gol seviyesine zaten yakın; ölçek ligler arası küçük sapmaları alır).
+    w <= 0 iken sot_composite'in kendisi döner (eski model, bit-bit aynı).
+    """
+    base = sot_composite(con, matches, before, alpha)
+    if xg_weight <= 0:
+        return base
+    xg = load_xg(con, before)
+    if not xg:
+        return base
+    by_id = {m.id: m for m in matches}
+    lg_g: dict[str, float] = {}
+    lg_x: dict[str, float] = {}
+    for mid, (xh, xa) in xg.items():
+        m = by_id.get(mid)
+        if m is None:
+            continue
+        lg_g[m.league] = lg_g.get(m.league, 0.0) + m.hg + m.ag
+        lg_x[m.league] = lg_x.get(m.league, 0.0) + xh + xa
+    tg, tx = sum(lg_g.values()), sum(lg_x.values())
+    glob = tg / tx if tx > 0 else 1.0
+    scale = {lg: (lg_g[lg] + prior_k * glob) / (lg_x[lg] + prior_k) for lg in lg_g}
+    w = min(float(xg_weight), 1.0)
+    out: dict[str, tuple[float, float]] = {}
+    for m in matches:
+        b = base.get(m.id) if base is not None else None
+        bh, ba = b if b is not None else (float(m.hg), float(m.ag))
+        x = xg.get(m.id)
+        if x is None:
+            out[m.id] = (bh, ba)
+            continue
+        c = scale.get(m.league, glob)
+        out[m.id] = ((1 - w) * bh + w * c * x[0], (1 - w) * ba + w * c * x[1])
+    return out
+
+
 def fit_goal_model(con: sqlite3.Connection, as_of: datetime, xi: float, sigma: float, tau: float, alpha: float = 1.0,
-                   cal_t: float = 1.0, cal_g: float = 1.0) -> tuple[GoalModel, list[MatchRecord], CountData]:
+                   cal_t: float = 1.0, cal_g: float = 1.0,
+                   xg_weight: float = 0.0) -> tuple[GoalModel, list[MatchRecord], CountData]:
     before = result_cutoff(as_of)
     matches = load_matches(con, before)
-    values = sot_composite(con, matches, before, alpha)
+    values = sot_composite(con, matches, before, alpha) if xg_weight <= 0 else xg_composite(
+        con, matches, before, alpha, xg_weight)
     data = build_count_data(matches, as_of, xi, values=values)
     cm = fit_count_model(data, REFERENCE_LEAGUE, sigma=sigma, tau=tau)
     rho = fit_rho(data, cm)
     p1, p1g = first_half_share(con, before)
-    gm = GoalModel(cm, rho, p1, p1g, before, xi, sigma, tau, len(data.weight), alpha, cal_t, cal_g)
+    gm = GoalModel(cm, rho, p1, p1g, before, xi, sigma, tau, len(data.weight), alpha, cal_t, cal_g, xg_weight)
     return gm, matches, data

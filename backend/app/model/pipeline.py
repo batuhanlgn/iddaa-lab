@@ -36,6 +36,10 @@ def load_params(con: sqlite3.Connection | None = None) -> dict[str, float]:
     stored = db.meta_get(con, "model_params") if con is not None else None
     if isinstance(stored, dict):
         p.update({k: float(v) for k, v in stored.items() if k in p})
+        # xG ağırlığı yalnızca backtest doğrulamasından geçtiyse saklanır; yoksa anahtar hiç eklenmez (sürüm aynı kalır)
+        xw = stored.get("xg_weight")
+        if isinstance(xw, (int, float)) and float(xw) > 0:
+            p["xg_weight"] = float(xw)
     elif PARAMS_PATH.exists():
         try:
             p.update({k: float(v) for k, v in json.loads(PARAMS_PATH.read_text(encoding="utf-8")).items() if k in p})
@@ -103,7 +107,7 @@ def fit_all(con: sqlite3.Connection, as_of: datetime | None = None, params: dict
     as_of = as_of or datetime.now(timezone.utc)
     params = params or load_params(con)
     gm, matches, _ = fit_goal_model(con, as_of, params["xi"], params["sigma"], params["tau"], params.get("alpha", 1.0),
-                                    params.get("cal_t", 1.0), params.get("cal_g", 1.0))
+                                    params.get("cal_t", 1.0), params.get("cal_g", 1.0), params.get("xg_weight", 0.0))
     before = gm.as_of
     shots = corners = None
     if with_aux:
