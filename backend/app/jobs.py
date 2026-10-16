@@ -5,6 +5,7 @@ python -m app.jobs refresh     # güncelleme: yakın dönem veri + iddaa + model
 python -m app.jobs odds        # yalnızca iddaa oranları + eşleştirme + tahminlerin oran kısmı
 python -m app.jobs lineups     # saatlik: yaklaşan maçların resmi kadroları + oranlar -> yeniden tahmin ve kupon
 python -m app.jobs backtest    # walk-forward doğrulama + hiperparametre ayarı + oyuncu doğrulaması
+python -m app.jobs xg          # Understat maç başı xG (5 büyük lig + Rusya)
 """
 from __future__ import annotations
 
@@ -145,10 +146,23 @@ def _league_info_safe(con, progress: Progress) -> None:
             progress(f"UYARI: {step.__name__} tamamlanamadı ({type(e).__name__}: {e})")
 
 
+def _xg_safe(con, progress: Progress) -> None:
+    """Understat maç başı xG (biten sezonlar bir kez, güncel sezon 12 saatte bir); model yalnızca backtest'te doğrulanmış
+    ağırlıkla kullanır. Kaynak hatası ana güncellemeyi durdurmaz."""
+    from .xg import ingest_xg
+
+    try:
+        asyncio.run(ingest_xg(con, progress))
+    except Exception as e:  # noqa: BLE001 - kaynak hatası iş kaydına yazılır, diğer adımlar sürer
+        log.exception("xG alınamadı")
+        progress(f"UYARI: xG güncellenemedi ({type(e).__name__}: {e})")
+
+
 def do_refresh(con, progress: Progress) -> None:
     asyncio.run(ingest_scoreboards(con, progress, months_back=2))
     asyncio.run(ingest_summaries(con, progress))
     _league_info_safe(con, progress)
+    _xg_safe(con, progress)
     _prepare(con, progress)
     _iddaa_safe(con, progress)
     progress(f"Eşleştirme: {match_iddaa_events(con)}")
@@ -198,6 +212,7 @@ def _scout_backtest_safe(con, progress: Progress) -> None:
 def do_bootstrap(con, progress: Progress) -> None:
     asyncio.run(ingest_scoreboards(con, progress))
     asyncio.run(ingest_summaries(con, progress))
+    _xg_safe(con, progress)  # ilk backtest xG ağırlığını sınayabilsin
     do_backtest(con, progress)
     do_refresh(con, progress)
 
@@ -212,6 +227,7 @@ COMMANDS: dict[str, Callable[[object, Progress], None]] = {
     "league_info": _league_info_safe,
     "scout_backtest": _scout_backtest_safe,
     "toto_backtest": _toto_backtest_safe,
+    "xg": _xg_safe,
     "ingest": lambda con, pr: (asyncio.run(ingest_scoreboards(con, pr)), asyncio.run(ingest_summaries(con, pr)),
                                asyncio.run(ingest_iddaa(con, pr))) and None,
 }

@@ -478,6 +478,18 @@ export interface Backtest {
   dispersion?: Record<string, number>;
   alpha_tuning?: { alpha: number; goal_families_logloss: number }[];
   score_calibration?: { t: number; g: number; used: boolean; eval_ll_raw: number; eval_ll_cal: number };
+  /** backend/app/backtest.py tune_xg_weight */
+  xg_tuning?: {
+    xg_weight: number;
+    accepted: boolean;
+    n_tune_xg_matches: number;
+    grid: { xg_weight: number; goal_families_logloss: number }[];
+    tune_best?: number;
+    note?: string;
+    val_ll_without?: number;
+    val_ll_with?: number;
+    val_bootstrap?: { mean_gain: number; ci90: [number, number]; p_better: number };
+  };
 }
 
 export interface PlayerMetric {

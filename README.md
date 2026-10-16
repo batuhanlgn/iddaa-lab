@@ -40,6 +40,8 @@ ve ilerleme **Veri** sayfasında görünür. Uygulama açıkken veriler kendili�
 | iddaa.com `sportsbookv2.iddaa.com` | Güncel iddaa oranları, MBS | ~1.100 futbol maçı; her değişiklik arşivlenir |
 | ESPN `apis/v2/.../standings` | Lig puan durumu (resmi tablo: puan silme, bölge notları, konferans/grup) | 39 lig; 15 dakikada bir |
 | ESPN `all/teams/{id}/schedule` | Karşılıklı geçmiş için eski sezon maçları | Ayrı tabloda (`h2h_history`); model eğitimi kullanmaz |
+| Understat `getLeagueData` | Maç başı xG (5 büyük lig + Rusya) | Yalnız backtest doğrularsa modele girer |
+| football-data.co.uk | Geçmiş kapanış oranları (MS, 2.5 A/Ü): benzer oran havuzu, scout/Spor Toto backtest'i | ~100 bin maç |
 | iddaa.com `sportotov2.iddaa.com` + `contentv2.iddaa.com/appconfig` | Spor Toto programı, sonuçlar, ikramiyeler; kolon bedeli ve kupon başına kolon sınırı | Anahtarsız |
 
 ## Model (Claude ↔ Codex ortak kararı, `docs/`)
@@ -54,6 +56,8 @@ ve ilerleme **Veri** sayfasında görünür. Uygulama açıkken veriler kendili�
   - Şut, isabetli şut ve gol bu skora koşullu üretilir: `P(S,T,F,O | F+O=skor)`.
   - Geçerli bir ilk 11 ve değişiklik senaryosu örneklenir.
   - Şutlar oyunculara dağıtılır. Her zaman `gol ≤ isabetli ≤ şut` tutar; kendi kalesine goller ayrı tutulur.
+- **xG:** takım gücü yanıtına `w·xG` karışabilir; w haftalık backtest'te ayarlama diliminde seçilir, doğrulama diliminde
+  xG'siz modele karşı eşleştirilmiş bootstrap'ta P(daha iyi) ≥ 0,95 değilse w = 0 (devre dışı).
 - **Oyuncu oranları:** şut/90, isabet ve dönüşüm oranları pozisyon ortalamasına doğru büzülür (az veri = temkinli tahmin).
 - **Piyasa harmanı:**
   - iddaa oranından marj arındırılır.

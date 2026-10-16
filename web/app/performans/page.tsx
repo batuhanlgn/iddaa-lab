@@ -5,7 +5,7 @@ import ScoutBacktestSection from "@/components/ScoutBacktestSection";
 import { EmptyState, PageHeader, SectionTitle, SkeletonRows, Stat } from "@/components/ui";
 import { dateTime, marketLine, odd, pct, signedPct } from "@/lib/format";
 import { KIND } from "@/components/coupons/CouponHistory";
-import type { TrackingGroup } from "@/lib/types";
+import type { Backtest, TrackingGroup } from "@/lib/types";
 import { BackendError, getJSON } from "@/lib/server-api";
 import type { PerformanceResponse } from "@/lib/types";
 
@@ -202,6 +202,7 @@ async function Perf() {
               </tbody>
             </table>
           </div>
+          {bt.xg_tuning && <XgTuning x={bt.xg_tuning} />}
         </div>
         <div>
           <SectionTitle>Lig bazında MS</SectionTitle>
@@ -254,6 +255,30 @@ async function Perf() {
         )}
       </section>
       <p className="text-xs text-muted">Backtest zamanı: {dateTime(bt.created_at)}</p>
+    </div>
+  );
+}
+
+function XgTuning({ x }: { x: NonNullable<Backtest["xg_tuning"]> }) {
+  const b = x.val_bootstrap;
+  return (
+    <div className="panel mt-3 p-4 text-sm">
+      <p className="kicker mb-1">xG ağırlığı (Understat)</p>
+      <p className={x.accepted ? "text-good-ink" : "text-ink-2"}>
+        {x.accepted ? `✓ Devrede: w = ${x.xg_weight}` : "■ Kullanılmıyor"}
+        {x.tune_best !== undefined && !x.accepted && <span className="text-muted"> · ayarlamada en iyi w = {x.tune_best}</span>}
+      </p>
+      {b ? (
+        <p className="num mt-1 text-xs text-ink-2">
+          Doğrulama (MS + A/Ü + KG): log-loss {x.val_ll_without?.toFixed(4)} → {x.val_ll_with?.toFixed(4)} · maç başı kazanç{" "}
+          {b.mean_gain >= 0 ? "+" : ""}
+          {b.mean_gain.toFixed(4)} (%90: {b.ci90[0].toFixed(4)} … {b.ci90[1].toFixed(4)}) · daha iyi olma olasılığı %
+          {Math.round(b.p_better * 100)} (eşik %95)
+        </p>
+      ) : (
+        x.note && <p className="mt-1 text-xs text-muted">{x.note}</p>
+      )}
+      <p className="mt-1 text-[0.7rem] text-muted">Ayarlama dilimindeki xG&apos;li maç: {x.n_tune_xg_matches.toLocaleString("tr-TR")}</p>
     </div>
   );
 }

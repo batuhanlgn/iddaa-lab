@@ -107,7 +107,7 @@ class RawPred:
 
 def walk_forward(con: sqlite3.Connection, start: datetime, end: datetime, xi: float, sigma: float, tau: float,
                  with_baselines: bool = True, with_corners: bool = False, alpha: float = 1.0, cal_t: float = 1.0,
-                 cal_g: float = 1.0, raw: list[RawPred] | None = None) -> list[Pred]:
+                 cal_g: float = 1.0, raw: list[RawPred] | None = None, xg_weight: float = 0.0) -> list[Pred]:
     preds: list[Pred] = []
     all_matches = load_matches(con, _iso(end))
     corner_vals = _stat_values(con, _iso(end), "corners") if with_corners else {}
@@ -118,7 +118,7 @@ def walk_forward(con: sqlite3.Connection, start: datetime, end: datetime, xi: fl
         if not test:
             wk = nxt
             continue
-        gm, train, _ = fit_goal_model(con, wk, xi, sigma, tau, alpha, cal_t, cal_g)
+        gm, train, _ = fit_goal_model(con, wk, xi, sigma, tau, alpha, cal_t, cal_g, xg_weight)
         base = _league_base_rates(train, wk)
         simple = None
         if with_baselines:
@@ -198,6 +198,29 @@ def _goal_families_ll(ps: list[Pred]) -> float:
         xs = [p for p in ps if p.fam == fam]
         tot += logloss([p.probs for p in xs], [p.outcome for p in xs])
     return tot
+
+
+def match_goal_losses(ps: list[Pred]) -> dict[str, float]:
+    """Maç başı MS + A/Ü + KG log-loss toplamı (eşleştirilmiş kıyas / bootstrap için)."""
+    out: dict[str, float] = defaultdict(float)
+    for p in ps:
+        if p.fam in ("ms", "au", "kg"):
+            out[p.match_id] += -float(np.log(max(p.probs[p.outcome], EPS)))
+    return dict(out)
+
+
+def paired_bootstrap(base: dict[str, float], new: dict[str, float], n_boot: int = 2000, seed: int = 11) -> dict:
+    """Ortak maçlarda maç başı kayıp farkı (taban - yeni; >0 yeni daha iyi): ortalama, %90 güven aralığı ve
+    yeninin daha iyi olduğu bootstrap örneklerinin payı (maç düzeyinde yeniden örnekleme)."""
+    ids = sorted(set(base) & set(new))
+    if not ids:
+        return {"n": 0, "mean_gain": 0.0, "ci90": [0.0, 0.0], "p_better": 0.0}
+    d = np.array([base[i] - new[i] for i in ids])
+    rng = np.random.default_rng(seed)
+    means = np.array([d[rng.integers(0, len(d), len(d))].mean() for _ in range(n_boot)])
+    return {"n": len(ids), "mean_gain": float(d.mean()),
+            "ci90": [float(np.quantile(means, 0.05)), float(np.quantile(means, 0.95))],
+            "p_better": float((means > 0).mean())}
 
 
 def logloss(ps: list[list[float]], ys: list[int]) -> float:
@@ -284,17 +307,23 @@ def tune_and_evaluate(con: sqlite3.Connection, progress: Callable[[str], None]) 
         progress(f"Şut ağırlığı α={alpha}: MS+A/Ü+KG log-loss={ll:.4f}")
     alpha = min(alpha_tuning, key=lambda t: t["goal_families_logloss"])["alpha"]
 
+    # 2b) xG ağırlığı: ayarlama diliminde seç, doğrulama diliminde xG'siz modele karşı eşleştirilmiş bootstrap ile sına
+    xg_tuning = tune_xg_weight(con, tune_start, val_start, eval_start, xi, sigma, alpha, progress)
+    xg_w = float(xg_tuning["xg_weight"])
+
     # 3) Skor kalibrasyonu: ayarlama diliminin ham tahminlerinden öğren
     raw: list[RawPred] = []
-    walk_forward(con, tune_start, val_start, xi, sigma, DEFAULT_TAU, with_baselines=False, alpha=alpha, raw=raw)
+    walk_forward(con, tune_start, val_start, xi, sigma, DEFAULT_TAU, with_baselines=False, alpha=alpha, raw=raw,
+                 xg_weight=xg_w)
     cal_t, cal_g, cal_ll = fit_score_calibration(raw)
     base_ll = _score_loglik(raw, 1.0, 1.0)
     progress(f"Skor kalibrasyonu (ayarlama): t={cal_t:.3f} g={cal_g:.3f} tam skor log-olabilirlik {base_ll:.4f} -> {cal_ll:.4f}")
 
     # 4) Kalibrasyon kararı DOĞRULAMA diliminde (değerlendirme dilimi bu karara karışmaz)
-    va_raw = walk_forward(con, val_start, eval_start, xi, sigma, DEFAULT_TAU, with_baselines=False, alpha=alpha)
+    va_raw = walk_forward(con, val_start, eval_start, xi, sigma, DEFAULT_TAU, with_baselines=False, alpha=alpha,
+                          xg_weight=xg_w)
     va_cal = walk_forward(con, val_start, eval_start, xi, sigma, DEFAULT_TAU, with_baselines=False, alpha=alpha,
-                          cal_t=cal_t, cal_g=cal_g)
+                          cal_t=cal_t, cal_g=cal_g, xg_weight=xg_w)
     ll_raw, ll_cal = _goal_families_ll(va_raw), _goal_families_ll(va_cal)
     use_cal = ll_cal < ll_raw
     score_cal = {"t": cal_t, "g": cal_g, "used": use_cal, "eval_ll_raw": ll_raw, "eval_ll_cal": ll_cal,
@@ -302,9 +331,11 @@ def tune_and_evaluate(con: sqlite3.Connection, progress: Callable[[str], None]) 
     progress(f"Doğrulama MS+A/Ü+KG log-loss: kalibrasyonsuz {ll_raw:.4f}, kalibre {ll_cal:.4f} -> {'kullanılıyor' if use_cal else 'kullanılmıyor'}")
     # 5) Değerlendirme (dokunulmamış dilim): yalnızca seçilen yapılandırmayla, rapor + aile doğrulaması
     ev = walk_forward(con, eval_start, now, xi, sigma, DEFAULT_TAU, with_baselines=True, with_corners=True, alpha=alpha,
-                      cal_t=cal_t if use_cal else 1.0, cal_g=cal_g if use_cal else 1.0)
+                      cal_t=cal_t if use_cal else 1.0, cal_g=cal_g if use_cal else 1.0, xg_weight=xg_w)
     params = {"xi": xi, "sigma": sigma, "tau": DEFAULT_TAU, "alpha": alpha,
               "cal_t": cal_t if use_cal else 1.0, "cal_g": cal_g if use_cal else 1.0}
+    if xg_w > 0:  # yalnızca doğrulamadan geçtiyse (aksi halde parametre seti ve model sürümü bugünküyle aynı kalır)
+        params["xg_weight"] = xg_w
     with db.tx(con):
         db.meta_set(con, "model_params", params)
     progress(f"Seçilen parametreler: {params}")
@@ -348,6 +379,7 @@ def tune_and_evaluate(con: sqlite3.Connection, progress: Callable[[str], None]) 
         "params": params,
         "tuning": tuning,
         "alpha_tuning": alpha_tuning,
+        "xg_tuning": xg_tuning,
         "score_calibration": score_cal,
         "summary": summary,
         "by_league": by_league,
@@ -358,6 +390,59 @@ def tune_and_evaluate(con: sqlite3.Connection, progress: Callable[[str], None]) 
         db.meta_set(con, "backtest", result)
         db.meta_set(con, "family_validation", family)
     return result
+
+
+XG_GRID = (0.0, 0.25, 0.5, 0.75, 1.0)
+XG_MIN_TUNE_MATCHES = 500    # ayarlama diliminde en az bu kadar xG'li maç yoksa adım atlanır
+XG_ACCEPT_P = 0.95           # doğrulamada eşleştirilmiş bootstrap'ta "daha iyi" payı en az bu olmalı
+
+
+def _xg_match_count(con: sqlite3.Connection, start: datetime, end: datetime) -> int:
+    try:
+        return int(con.execute(
+            "SELECT COUNT(*) FROM match_xg x JOIN matches m ON m.id=x.match_id WHERE m.date_utc >= ? AND m.date_utc < ?",
+            (_iso(start), _iso(end)),
+        ).fetchone()[0])
+    except sqlite3.OperationalError:  # eski kurulum: tablo yok
+        return 0
+
+
+def tune_xg_weight(con: sqlite3.Connection, tune_start: datetime, val_start: datetime, eval_start: datetime, xi: float,
+                   sigma: float, alpha: float, progress: Callable[[str], None]) -> dict:
+    """xG ağırlığı w: AYARLAMA diliminde MS+A/Ü+KG log-loss ile seçilir; DOĞRULAMA diliminde w=0 (bugünkü model) ile
+    maç başı eşleştirilmiş bootstrap kıyası yapılır. Yalnızca ortalama kazanç > 0 ve P(daha iyi) >= XG_ACCEPT_P ise
+    devreye girer; aksi halde w=0 (model değişmez). Değerlendirme dilimi bu karara karışmaz."""
+    n_tune = _xg_match_count(con, tune_start, val_start)
+    res: dict = {"xg_weight": 0.0, "n_tune_xg_matches": n_tune, "grid": [], "accepted": False}
+    if n_tune < XG_MIN_TUNE_MATCHES:
+        res["note"] = f"ayarlama diliminde yetersiz xG verisi ({n_tune} maç)"
+        progress(f"xG ağırlığı: {res['note']}; xG kullanılmıyor")
+        return res
+    for w in XG_GRID:
+        ps = walk_forward(con, tune_start, val_start, xi, sigma, DEFAULT_TAU, with_baselines=False, alpha=alpha,
+                          xg_weight=w)
+        ll = _goal_families_ll(ps)
+        res["grid"].append({"xg_weight": w, "goal_families_logloss": ll})
+        progress(f"xG ağırlığı w={w}: MS+A/Ü+KG log-loss={ll:.4f}")
+    best = float(min(res["grid"], key=lambda t: t["goal_families_logloss"])["xg_weight"])
+    res["tune_best"] = best
+    if best <= 0:
+        res["note"] = "ayarlama diliminde xG'siz model en iyi"
+        progress(f"xG ağırlığı: {res['note']}")
+        return res
+    va0 = walk_forward(con, val_start, eval_start, xi, sigma, DEFAULT_TAU, with_baselines=False, alpha=alpha)
+    va1 = walk_forward(con, val_start, eval_start, xi, sigma, DEFAULT_TAU, with_baselines=False, alpha=alpha,
+                       xg_weight=best)
+    boot = paired_bootstrap(match_goal_losses(va0), match_goal_losses(va1))
+    accepted = boot["mean_gain"] > 0 and boot["p_better"] >= XG_ACCEPT_P
+    res.update({"val_ll_without": _goal_families_ll(va0), "val_ll_with": _goal_families_ll(va1), "val_bootstrap": boot,
+                "accepted": accepted, "decided_on": "doğrulama dilimi"})
+    if accepted:
+        res["xg_weight"] = best
+    progress(f"xG doğrulama (w={best}): log-loss {res['val_ll_without']:.4f} -> {res['val_ll_with']:.4f}, maç başı kazanç "
+             f"{boot['mean_gain']:+.4f} (%90 GA {boot['ci90'][0]:+.4f}..{boot['ci90'][1]:+.4f}, "
+             f"P(daha iyi)={boot['p_better']:.2f}) -> {'devrede' if accepted else 'kullanılmıyor'}")
+    return res
 
 
 def out_of_sample_dispersion(con: sqlite3.Connection, start: datetime, end: datetime, xi: float) -> dict[str, float]:
@@ -538,7 +623,7 @@ def tune_lineup_beta(con: sqlite3.Connection, progress: Callable[[str], None]) -
         ids = [r["id"] for r in rows if r["id"] in all_matches]
         if ids:
             gm, _, _ = fit_goal_model(con, wk, params["xi"], params["sigma"], params["tau"], params.get("alpha", 1.0),
-                                      params.get("cal_t", 1.0), params.get("cal_g", 1.0))
+                                      params.get("cal_t", 1.0), params.get("cal_g", 1.0), params.get("xg_weight", 0.0))
             ps = PlayerStore(con, wk)
             for mid in ids:
                 m = all_matches[mid]
