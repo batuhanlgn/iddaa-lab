@@ -169,6 +169,19 @@ def do_backtest(con, progress: Progress) -> None:
 
     tune_lineup_beta(con, progress)
     _scout_backtest_safe(con, progress)
+    _toto_backtest_safe(con, progress)
+
+
+def _toto_backtest_safe(con, progress: Progress) -> None:
+    """Spor Toto kupon mantığının geçmiş haftalarda sınanması (geçmiş program/sonuç/ikramiye + walk-forward model)."""
+    from .sportoto_backtest import fetch_toto_history, run_toto_backtest
+
+    try:
+        asyncio.run(fetch_toto_history(con, progress))
+        run_toto_backtest(con, progress)
+    except Exception as e:  # noqa: BLE001 - rapor üretilemezse diğer backtest sonuçları yine kaydedilir
+        log.exception("Spor Toto backtest başarısız")
+        progress(f"UYARI: Spor Toto backtest tamamlanamadı ({type(e).__name__}: {e})")
 
 
 def _scout_backtest_safe(con, progress: Progress) -> None:
@@ -198,6 +211,7 @@ COMMANDS: dict[str, Callable[[object, Progress], None]] = {
     "backtest": do_backtest,
     "league_info": _league_info_safe,
     "scout_backtest": _scout_backtest_safe,
+    "toto_backtest": _toto_backtest_safe,
     "ingest": lambda con, pr: (asyncio.run(ingest_scoreboards(con, pr)), asyncio.run(ingest_summaries(con, pr)),
                                asyncio.run(ingest_iddaa(con, pr))) and None,
 }

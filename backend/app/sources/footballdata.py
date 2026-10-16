@@ -118,6 +118,14 @@ OU25_PAIRS: tuple[tuple[str, str], ...] = (
 OU_OVERROUND_MAX = 1.20
 
 
+# football-data'nın kısaltılmış/bozuk takım adları -> eşleştirmede kullanılan ad (ESPN ile benzerlik kurulamayanlar)
+TEAM_ALIASES: dict[str, str] = {"Buyuksehyr": "Istanbul Basaksehir"}
+
+
+def canonical_team(name: str) -> str:
+    return TEAM_ALIASES.get(name, name)
+
+
 def league_info(slug: str) -> tuple[str, str]:
     """Lig kısaltması -> (ad, ülke). Önce proje lig listesi, sonra football-data tablosu."""
     lg = LEAGUE_BY_SLUG.get(slug)

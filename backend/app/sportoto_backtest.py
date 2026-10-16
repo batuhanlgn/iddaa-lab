@@ -29,6 +29,7 @@ from .config import TOTO_BUDGET_TL, TOTO_DEFAULT_MAX_COLUMN, TOTO_LOCK_MINUTES
 from .model import markets as mk
 from .model.pipeline import fit_all, load_params, predict_match
 from .scout_backtest import _fd_index, _find_fd, _market_rows
+from .sources import footballdata as fd
 from .sources import sportoto as src
 from .sources.http import FetchError, PoliteClient
 from .sportoto import OUTCOMES, TIERS, _best_match, _pool, hit_distribution, optimize, split_event_name, winning_columns
@@ -90,7 +91,6 @@ RANDOM_SEED = 20261016
 _CARRY_TIER = {"1": 15, "2": 14, "3": 13, "4": 12}   # nextDrawExpectedWins.winClass -> kademe
 _TK_MATCH_BEFORE = timedelta(days=2)                 # totokazan haftası satış açılmadan en çok bu kadar önce açılır
 # football-data takım adı -> ESPN adı (benzerlikle eşleşmeyenler; canlıda iddaa oranı bu maçlarda da vardır)
-FD_TEAM_ALIASES = {"Buyuksehyr": "Istanbul Basaksehir"}
 WELL_COVERED_MAX_NO_DATA = 3  # "veri yok" maç sayısı en çok bu kadar olan hafta kapsamlı sayılır
 _COVER_BINS = (0.0, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0001)
 STRATEGIES = ("canli", "piyasa", "model")
@@ -401,10 +401,9 @@ def calibration(weeks: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _fd_alias(r: sqlite3.Row) -> sqlite3.Row | dict[str, Any]:
-    if r["home"] in FD_TEAM_ALIASES or r["away"] in FD_TEAM_ALIASES:
+    if r["home"] in fd.TEAM_ALIASES or r["away"] in fd.TEAM_ALIASES:
         d = dict(r)
-        d["home"] = FD_TEAM_ALIASES.get(d["home"], d["home"])
-        d["away"] = FD_TEAM_ALIASES.get(d["away"], d["away"])
+        d["home"], d["away"] = fd.canonical_team(d["home"]), fd.canonical_team(d["away"])
         return d
     return r
 

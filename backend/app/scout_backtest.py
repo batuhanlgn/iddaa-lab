@@ -29,6 +29,7 @@ from .context import match_context
 from .coupons import model_pick, settle_selection
 from .matching import similarity
 from .model.pipeline import fit_all, load_params, predict_match
+from .sources import footballdata as fd_src
 
 log = logging.getLogger(__name__)
 Progress = Callable[[str], None]
@@ -75,7 +76,8 @@ def _find_fd(m: sqlite3.Row, idx: dict[tuple[str, str], list[sqlite3.Row]]) -> s
     best: tuple[float, sqlite3.Row | None] = (0.0, None)
     for dd in (0, -1, 1):
         for r in idx.get((m["league"], (d0 + timedelta(days=dd)).strftime("%Y-%m-%d")), []):
-            sh, sa = similarity(m["hn"], r["home"]), similarity(m["an"], r["away"])
+            sh = similarity(m["hn"], fd_src.canonical_team(r["home"]))
+            sa = similarity(m["an"], fd_src.canonical_team(r["away"]))
             ok = (sh >= _FD_MATCH_MIN and sa >= _FD_MATCH_MIN) or (
                 max(sh, sa) >= _FD_MATCH_STRONG and min(sh, sa) >= _FD_MATCH_WEAK)
             if ok and r["hg"] == m["hg"] and r["ag"] == m["ag"] and sh + sa > best[0]:

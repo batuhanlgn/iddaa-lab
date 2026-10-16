@@ -703,6 +703,81 @@ export interface TotoWeek {
   fetched_at: string;
 }
 
+/** backend/app/sportoto_backtest.py run_toto_backtest — strateji özeti */
+export interface TotoBtStrategy {
+  n_weeks: number;
+  cost: number;
+  prize: number;
+  net: number;
+  roi: number;
+  avg_hits: number;
+  median_hits?: number;
+  weeks_12plus: number;
+  weeks_13plus: number;
+  weeks_14plus: number;
+  weeks_15: number;
+  prize_weeks: number;
+  max_prize?: number;
+  hit_distribution?: Record<string, number>;
+  /** yalnız "rastgele": 200 tekrarın dağılımı */
+  n_runs?: number;
+  roi_p05?: number;
+  roi_p50?: number;
+  roi_p95?: number;
+  prize_p50?: number;
+  share_runs_below_canli?: number;
+  share_runs_no_prize?: number;
+}
+
+export interface TotoBtWeek {
+  cycle_no: number;
+  program_name: string | null;
+  payin_end_utc: string;
+  column_price: number;
+  hits: number;
+  columns: number;
+  cost: number;
+  prize: number;
+  expected_hits: number;
+  n_by_source: Record<string, number>;
+  strategies: Record<string, { hits: number; prize: number; cost: number }>;
+}
+
+export interface TotoBtProbScore {
+  n: number;
+  logloss: number;
+  brier: number;
+  top_pred: number;
+  top_hit: number;
+}
+
+export type TotoBacktestResponse =
+  | { available: false }
+  | {
+      available: true;
+      created_at: string;
+      window: { from_cycle: number; to_cycle: number; from: string; to: string; n_weeks: number };
+      budget: number;
+      price_today: number;
+      columns: number;
+      price_schedule: { from_cycle: number; to_cycle: number | null; price: number; source: string }[];
+      excluded: { cycle_no: number; reason: string }[];
+      coverage: { n_events: number; share: Record<"harman" | "model" | "piyasa" | "yok", number> };
+      strategies: Record<"canli" | "piyasa" | "model" | "rastgele", TotoBtStrategy>;
+      segments: Record<"canli" | "piyasa" | "model", Record<string, TotoBtStrategy>>;
+      calibration: {
+        expected_hits: number;
+        actual_hits: number;
+        same_matches: Record<"model" | "piyasa" | "harman", TotoBtProbScore>;
+        p_at_least_expected_weeks: Record<string, number>;
+        p_at_least_observed_weeks: Record<string, number>;
+      };
+      best_weeks: { cycle_no: number; program_name: string | null; hits: number; prize: number; cost: number }[];
+      worst_weeks: { cycle_no: number; program_name: string | null; hits: number; prize: number; cost: number }[];
+      weeks: TotoBtWeek[];
+      notes: string[];
+    };
+
 export interface TotoResponse {
   week: TotoWeek | null;
   coupon: TotoCoupon | null;

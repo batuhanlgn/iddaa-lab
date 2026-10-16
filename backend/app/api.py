@@ -389,6 +389,16 @@ def toto() -> dict[str, Any]:
     return toto_view(con())
 
 
+@app.get("/api/toto/backtest")
+def toto_backtest() -> dict[str, Any]:
+    """Spor Toto backtest özeti; haftalar maç ayrıntısı olmadan (tam sonuç ~1,3 MB)."""
+    r = db.meta_get(con(), "toto_backtest")
+    if not r:
+        return {"available": False}
+    return {"available": True, **{k: v for k, v in r.items() if k != "weeks"},
+            "weeks": [{k: v for k, v in w.items() if k not in ("events", "pools")} for w in r.get("weeks", [])]}
+
+
 @app.get("/api/leagues")
 def leagues() -> dict[str, Any]:
     return {"leagues": [{"slug": lg.slug, "name": lg.name, "country": lg.country, "is_cup": lg.is_cup} for lg in LEAGUES]}

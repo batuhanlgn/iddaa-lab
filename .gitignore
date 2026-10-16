@@ -11,3 +11,6 @@ web/.next/
 web/out/
 web/static-data/
 _api_bak/
+
+# Claude Code ajan worktree klasörleri (yerel)
+.claude/worktrees/

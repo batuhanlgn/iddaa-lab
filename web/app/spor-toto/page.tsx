@@ -1,10 +1,11 @@
 import Link from "next/link";
 import { Suspense } from "react";
 import ErrorPanel from "@/components/ErrorPanel";
+import TotoBacktestSection from "@/components/TotoBacktestSection";
 import { EmptyState, PageHeader, SectionTitle, SkeletonRows, Stat } from "@/components/ui";
 import { dateTime, pct, relative } from "@/lib/format";
 import { BackendError, getJSON } from "@/lib/server-api";
-import type { TotoCoupon, TotoEvent, TotoOutcome, TotoResponse, TotoSource } from "@/lib/types";
+import type { TotoBacktestResponse, TotoCoupon, TotoEvent, TotoOutcome, TotoResponse, TotoSource } from "@/lib/types";
 
 const OUTS: TotoOutcome[] = ["1", "0", "2"];
 const tl = new Intl.NumberFormat("tr-TR", { style: "currency", currency: "TRY", maximumFractionDigits: 0 });
@@ -203,6 +204,25 @@ async function Toto() {
   );
 }
 
+async function TotoBacktest() {
+  let bt: TotoBacktestResponse;
+  try {
+    bt = await getJSON<TotoBacktestResponse>("/api/toto/backtest");
+  } catch (e) {
+    // Bölüm, backtest yayınlanmadan önce dışa aktarılmış veride yoktur; diğer hatalar kullanıcıya gösterilir
+    if (e instanceof BackendError && e.status === 404) return null;
+    return <ErrorPanel message={e instanceof BackendError ? e.message : "Spor Toto backtest sonucu alınamadı."} />;
+  }
+  if (!bt.available) {
+    return (
+      <EmptyState title="Backtest henüz çalışmadı">
+        Spor Toto backtest&apos;i haftalık backtest işinde (pazartesi) çalışır; ilk sonuç geldiğinde burada görünür.
+      </EmptyState>
+    );
+  }
+  return <TotoBacktestSection bt={bt} />;
+}
+
 export default function TotoPage() {
   return (
     <>
@@ -210,6 +230,11 @@ export default function TotoPage() {
       <Suspense fallback={<SkeletonRows n={8} h={48} />}>
         <Toto />
       </Suspense>
+      <div className="mt-10">
+        <Suspense fallback={<SkeletonRows n={4} h={48} />}>
+          <TotoBacktest />
+        </Suspense>
+      </div>
     </>
   );
 }

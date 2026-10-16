@@ -231,6 +231,8 @@ def test_fd_alias_lets_basaksehir_match_football_data():
     con.execute("INSERT INTO t VALUES('tur.1', '2025-03-01', 'Buyuksehyr', 'Konyaspor', 2, 1, 1.9, 3.5, 4.0)")
     rows = con.execute("SELECT * FROM t").fetchall()
     m = {"league": "tur.1", "date_utc": "2025-03-01T16:00:00Z", "hn": "Istanbul Basaksehir", "an": "Konyaspor", "hg": 2, "ag": 1}
-    assert _find_fd(m, {("tur.1", "2025-03-01"): rows}) is None  # type: ignore[arg-type]
+    # _find_fd football-data ad düzeltmesini (footballdata.TEAM_ALIASES) kendisi uygular: ham satırla da eşleşir
+    hit_raw = _find_fd(m, {("tur.1", "2025-03-01"): rows})  # type: ignore[arg-type]
+    assert hit_raw is not None and hit_raw["o1"] == 1.9
     hit = _find_fd(m, {("tur.1", "2025-03-01"): [_fd_alias(r) for r in rows]})  # type: ignore[arg-type]
     assert hit is not None and hit["o1"] == 1.9
