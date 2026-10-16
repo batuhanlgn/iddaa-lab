@@ -82,9 +82,10 @@ def con() -> sqlite3.Connection:
     c = sqlite3.connect(":memory:", isolation_level=None)
     c.row_factory = sqlite3.Row
     c.executescript(db.SCHEMA)
-    for _t, _c, ddl in db.MIGRATIONS:
-        c.execute(ddl)
     c.executescript(so.SCHEMA_SQL)
+    for table, column, ddl in db.MIGRATIONS:  # db.init_db ile aynı sıra: şema, sonra eksik sütunlar
+        if column not in {r["name"] for r in c.execute(f"PRAGMA table_info({table})")}:
+            c.execute(ddl)
     return c
 
 

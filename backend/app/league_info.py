@@ -83,6 +83,60 @@ def match_standings(con: sqlite3.Connection, slug: str, home_id: str, away_id: s
     return {"season": t.get("season"), "group": best[1]["name"], "entries": best[1]["entries"], "fetched_at": t.get("fetched_at")}
 
 
+def standings_asof(con: sqlite3.Connection, slug: str, home_id: str, away_id: str, before: str) -> dict[str, Any] | None:
+    """Maç tarihindeki puan durumu, o sezonun `before` öncesi sonuçlarından (scout backtest'i; geleceği görmez).
+
+    Sıralama puan > averaj > atılan gol; puan silme ve bölge notu bilinmez (None). Kupalar (eleme/grup) için None.
+    Konferanslı ligler (MLS) tek tablo olarak hesaplanır — yaklaşık."""
+    lg = LEAGUE_BY_SLUG.get(slug)
+    if lg is None or lg.is_cup:
+        return None
+    # Sezon: maçın kendi satırından; yoksa ligde bu tarihe kadarki son sezon
+    r = con.execute("SELECT season FROM matches WHERE league=? AND home_id=? AND away_id=? AND date_utc=?",
+                    (slug, home_id, away_id, before)).fetchone()
+    if r is None or r["season"] is None:
+        r = con.execute("SELECT season FROM matches WHERE league=? AND date_utc<=? AND season IS NOT NULL "
+                        "ORDER BY date_utc DESC LIMIT 1", (slug, before)).fetchone()
+    if r is None or r["season"] is None:
+        return None
+    season = r["season"]
+    teams: dict[str, dict[str, Any]] = {}
+
+    def row(tid: str, name: str, logo: str | None, abbr: str | None) -> dict[str, Any]:
+        if tid not in teams:
+            teams[tid] = {"team_id": tid, "name": name, "abbreviation": abbr, "logo": logo, "played": 0, "won": 0,
+                          "drawn": 0, "lost": 0, "gf": 0, "ga": 0, "gd": 0, "points": 0, "deductions": 0, "rank": None,
+                          "note": None}
+        return teams[tid]
+
+    for m in con.execute(
+        """SELECT m.home_id, m.away_id, m.home_goals, m.away_goals, m.completed, m.date_utc,
+                  th.name hn, th.logo hl, th.abbreviation ha, ta.name an, ta.logo al, ta.abbreviation aa
+           FROM matches m JOIN teams th ON th.id=m.home_id JOIN teams ta ON ta.id=m.away_id
+           WHERE m.league=? AND m.season=?""",
+        (slug, season),
+    ):
+        h = row(m["home_id"], m["hn"], m["hl"], m["ha"])
+        a = row(m["away_id"], m["an"], m["al"], m["aa"])
+        if not m["completed"] or m["date_utc"] >= before or m["home_goals"] is None:
+            continue
+        hg, ag = m["home_goals"], m["away_goals"]
+        for t, gf, ga in ((h, hg, ag), (a, ag, hg)):
+            t["played"] += 1
+            t["gf"] += gf
+            t["ga"] += ga
+            res = "won" if gf > ga else "drawn" if gf == ga else "lost"
+            t[res] += 1
+            t["points"] += {"won": 3, "drawn": 1, "lost": 0}[res]
+    if home_id not in teams and away_id not in teams:
+        return None
+    entries = sorted(teams.values(), key=lambda e: (-e["points"], -(e["gf"] - e["ga"]), -e["gf"], e["name"]))
+    for i, e in enumerate(entries, 1):
+        e["gd"] = e["gf"] - e["ga"]
+        e["rank"] = i
+    return {"season": str(season), "group": f"{lg.country} · {lg.name}", "entries": entries, "fetched_at": None}
+
+
 # ---------------------------------------------------------------- karşılıklı geçmiş (tablo: db.SCHEMA h2h_history)
 
 def head_to_head(con: sqlite3.Connection, a_id: str, b_id: str, before: str, limit: int = H2H_LIMIT) -> list[dict[str, Any]]:

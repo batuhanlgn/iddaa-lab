@@ -59,6 +59,8 @@ CREATE TABLE IF NOT EXISTS hist_odds_matches (
     fx REAL NOT NULL,
     f2 REAL NOT NULL,
     odds_src TEXT,                    -- hangi oran sütunu (AvgC, PSC, B365 ... / iddaa)
+    o_over25 REAL,                    -- 2.5 gol Üst/Alt kapanış oranı (yalnız football-data ana ligleri)
+    o_under25 REAL,
     PRIMARY KEY (source, src_key)
 );
 -- kapsayan indeks: arama ve özetler tabloya inmeden indeksten okunur
@@ -85,10 +87,13 @@ def _due(meta: dict[str, Any] | None, past: bool, now: datetime, refresh_hours: 
 def _fd_row(m: fd.HistMatch) -> tuple[Any, ...]:
     f1, fx, f2 = devig([m.o1, m.ox, m.o2])
     return (SOURCE_FD, m.key, m.league, m.date, m.home, m.away, m.hg, m.ag, m.hthg, m.htag,
-            m.o1, m.ox, m.o2, float(f1), float(fx), float(f2), m.odds_src)
+            m.o1, m.ox, m.o2, float(f1), float(fx), float(f2), m.odds_src, m.o_over25, m.o_under25)
 
 
-_INSERT = "INSERT OR REPLACE INTO hist_odds_matches VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+_COLS = "source, src_key, league, date, home, away, hg, ag, hthg, htag, o1, ox, o2, f1, fx, f2, odds_src"
+_INSERT = f"INSERT OR REPLACE INTO hist_odds_matches({_COLS}) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+# football-data satırları 2.5 gol Alt/Üst kapanış oranlarını da taşır (scout backtest'i)
+_INSERT_FD = f"INSERT OR REPLACE INTO hist_odds_matches({_COLS}, o_over25, o_under25) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 
 _IDDAA_CLOSING_SQL = """
 WITH last AS (
@@ -202,7 +207,7 @@ async def ingest_history(con: sqlite3.Connection, progress: Progress, *, fetch: 
                 n_missing += 1
                 db.meta_set(con, key, {"status": "missing", "fetched_at": fetched_at, "final": past, "rows": 0})
                 continue
-            con.executemany(_INSERT, [_fd_row(m) for m in ms])
+            con.executemany(_INSERT_FD, [_fd_row(m) for m in ms])
             n_rows += len(ms)
             db.meta_set(con, key, {"status": "ok", "fetched_at": fetched_at, "final": past, "rows": len(ms)})
         pruned = con.execute("DELETE FROM hist_odds_matches WHERE source=? AND date < ?", (SOURCE_FD, min_date)).rowcount
@@ -301,7 +306,8 @@ def _pool_size(con: sqlite3.Connection) -> int:
 
 def find_similar_probs(con: sqlite3.Connection, probs: tuple[float, float, float] | list[float], *,
                        min_similarity: float = SIMILAR_MIN, limit_examples: int = 12,
-                       odds: tuple[float, float, float] | None = None, basis: str = "model") -> dict[str, Any]:
+                       odds: tuple[float, float, float] | None = None, basis: str = "model",
+                       before: str | None = None) -> dict[str, Any]:
     """Hedef adil 1X2 olasılıklarına (ör. modelin MS olasılıkları) benzer geçmiş maçlar. Olasılıklar normalize edilir.
     SQL'de kapsayan indeksle aralık filtresi (f1, f2, fx ∈ [t·s, t/s]; tabloya inilmez), ardından Python'da kesin
     benzerlik ve özetler; ad/oran alanları yalnızca örnek satırlar için okunur."""
@@ -317,8 +323,10 @@ def find_similar_probs(con: sqlite3.Connection, probs: tuple[float, float, float
     rows = cur.execute(
         """SELECT rowid, source, league, date, hg, ag, hthg, htag, f1, fx, f2
            FROM hist_odds_matches
-           WHERE f1 BETWEEN ? AND ? AND f2 BETWEEN ? AND ? AND fx BETWEEN ? AND ?""",
-        (t[0] * s - _EPS, t[0] / s + _EPS, t[2] * s - _EPS, t[2] / s + _EPS, t[1] * s - _EPS, t[1] / s + _EPS),
+           WHERE f1 BETWEEN ? AND ? AND f2 BETWEEN ? AND ? AND fx BETWEEN ? AND ?
+             AND (? IS NULL OR date < ?)""",
+        (t[0] * s - _EPS, t[0] / s + _EPS, t[2] * s - _EPS, t[2] / s + _EPS, t[1] * s - _EPS, t[1] / s + _EPS,
+         before, before),
     ).fetchall()
     cands = []
     for r in rows:
@@ -380,14 +388,14 @@ def find_similar_probs(con: sqlite3.Connection, probs: tuple[float, float, float
 
 
 def find_similar(con: sqlite3.Connection, odds: tuple[float, float, float], *, min_similarity: float = SIMILAR_MIN,
-                 limit_examples: int = 12) -> dict[str, Any]:
+                 limit_examples: int = 12, before: str | None = None) -> dict[str, Any]:
     """Hedef iddaa MS oranları (1, X, 2) -> marjı arındırılıp find_similar_probs ile aranır."""
     if len(odds) != 3 or any(float(o) <= 1.0 for o in odds):
         raise ValueError(f"Geçersiz MS oranları: {odds}")
     o = (float(odds[0]), float(odds[1]), float(odds[2]))
     p = devig(list(o))
     return find_similar_probs(con, (float(p[0]), float(p[1]), float(p[2])), min_similarity=min_similarity,
-                              limit_examples=limit_examples, odds=o, basis="iddaa")
+                              limit_examples=limit_examples, odds=o, basis="iddaa", before=before)
 
 
 def payload_target(payload: dict[str, Any]) -> tuple[str, tuple[float, float, float]] | None:
@@ -407,12 +415,14 @@ def payload_target(payload: dict[str, Any]) -> tuple[str, tuple[float, float, fl
 
 
 def similar_for_payload(con: sqlite3.Connection, payload: dict[str, Any], *, min_similarity: float = SIMILAR_MIN,
-                        limit_examples: int = 12) -> dict[str, Any] | None:
-    """Maç sayfası/dışa aktarım için tek çağrı: hedef yoksa None."""
+                        limit_examples: int = 12, before: str | None = None) -> dict[str, Any] | None:
+    """Maç sayfası/dışa aktarım için tek çağrı: hedef yoksa None. `before` ("YYYY-MM-DD"): yalnız bu tarihten önceki
+    maçlar (backtest'te geleceği görmemek için)."""
     tg = payload_target(payload)
     if tg is None:
         return None
     basis, v = tg
     if basis == "iddaa":
-        return find_similar(con, v, min_similarity=min_similarity, limit_examples=limit_examples)
-    return find_similar_probs(con, v, min_similarity=min_similarity, limit_examples=limit_examples, basis="model")
+        return find_similar(con, v, min_similarity=min_similarity, limit_examples=limit_examples, before=before)
+    return find_similar_probs(con, v, min_similarity=min_similarity, limit_examples=limit_examples, basis="model",
+                              before=before)

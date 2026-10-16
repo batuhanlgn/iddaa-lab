@@ -535,8 +535,49 @@ export interface LivePicksSummary {
   }[];
 }
 
+export interface ScoutBtSummary {
+  n: number;
+  hits?: number;
+  hit_rate?: number;
+  avg_odd?: number;
+  p_model?: number;
+  p_market?: number;
+  edge_vs_market?: number;
+  roi_close?: number;
+  roi_iddaa?: number;
+  roi_iddaa_ci95?: [number, number];
+}
+
+export interface ScoutBtGroups {
+  scout: ScoutBtSummary;
+  scout_yuksek: ScoutBtSummary;
+  scout_orta: ScoutBtSummary;
+  model_all: ScoutBtSummary;
+  model_on_pas: ScoutBtSummary;
+  model_on_oneri: ScoutBtSummary;
+  scout_by_market: Record<string, ScoutBtSummary>;
+}
+
+/** backend/app/scout_backtest.py run_scout_backtest */
+export interface ScoutBacktest {
+  created_at: string;
+  window: [string, string];
+  n_matches: number;
+  skipped: Record<string, number>;
+  iddaa_margins: Record<string, number>;
+  verdicts: Record<string, number>;
+  pas_reasons: [string, number][];
+  all: ScoutBtGroups;
+  first_half: ScoutBtGroups;
+  second_half: ScoutBtGroups;
+  by_league: Record<string, ScoutBtSummary>;
+  league_names: Record<string, string>;
+  notes: string[];
+}
+
 export interface PerformanceResponse {
   live_picks: LivePicksSummary | null;
+  scout_backtest?: ScoutBacktest | null;
   tracking: { updated_at: string; groups: Record<string, TrackingGroup>; recent_picks: TrackedPick[]; family_labels: Record<string, string> } | null;
   player_calibration: Record<string, { a: number; b: number; use: boolean; cv_ll_raw: number | null; cv_ll_cal: number | null; n: number }> | null;
   backtest: Backtest | null;

@@ -168,6 +168,18 @@ def do_backtest(con, progress: Progress) -> None:
     from .backtest import tune_lineup_beta
 
     tune_lineup_beta(con, progress)
+    _scout_backtest_safe(con, progress)
+
+
+def _scout_backtest_safe(con, progress: Progress) -> None:
+    """Scout raporunun geçmiş maçlarda sınanması (benzer oran havuzundaki kapanış oranlarıyla)."""
+    from .scout_backtest import run_scout_backtest
+
+    try:
+        run_scout_backtest(con, progress)
+    except Exception as e:  # noqa: BLE001 - rapor üretilemezse diğer backtest sonuçları yine kaydedilir
+        log.exception("Scout backtest başarısız")
+        progress(f"UYARI: scout backtest tamamlanamadı ({type(e).__name__}: {e})")
 
 
 def do_bootstrap(con, progress: Progress) -> None:
@@ -185,6 +197,7 @@ COMMANDS: dict[str, Callable[[object, Progress], None]] = {
     "lineup_beta": lambda con, pr: __import__("app.backtest", fromlist=["tune_lineup_beta"]).tune_lineup_beta(con, pr) and None,
     "backtest": do_backtest,
     "league_info": _league_info_safe,
+    "scout_backtest": _scout_backtest_safe,
     "ingest": lambda con, pr: (asyncio.run(ingest_scoreboards(con, pr)), asyncio.run(ingest_summaries(con, pr)),
                                asyncio.run(ingest_iddaa(con, pr))) and None,
 }

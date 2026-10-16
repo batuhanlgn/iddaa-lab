@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import Calibration from "@/components/charts/Calibration";
 import ErrorPanel from "@/components/ErrorPanel";
+import ScoutBacktestSection from "@/components/ScoutBacktestSection";
 import { EmptyState, PageHeader, SectionTitle, SkeletonRows, Stat } from "@/components/ui";
 import { dateTime, marketLine, odd, pct, signedPct } from "@/lib/format";
 import { KIND } from "@/components/coupons/CouponHistory";
@@ -79,6 +80,7 @@ async function Perf() {
         />
       </section>
 
+      {d.scout_backtest && <ScoutBacktestSection bt={d.scout_backtest} />}
       {d.tracking && <TrackingSection t={d.tracking} />}
       {d.live_picks && <LivePicksSection s={d.live_picks} />}
 

@@ -173,7 +173,15 @@ def iddaa_markets(con: sqlite3.Connection, event_id: int, sm_model: np.ndarray, 
            WHERE o.event_id=? AND e.active=1 AND e.is_live=0 ORDER BY o.market_key, o.outcome_no""",
         (event_id,),
     ).fetchall()
-    groups: dict[str, list[sqlite3.Row]] = {}
+    return markets_from_rows([dict(r) for r in rows], sm_model, j_model, p1, rho, corners, blend_w, validated, start)
+
+
+def markets_from_rows(rows: list[dict[str, Any]], sm_model: np.ndarray, j_model: mk.Joint, p1: float, rho: float,
+                      corners: dict | None, blend_w: float, validated: dict[str, bool],
+                      start: tuple[float, float]) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Oran satırlarından (market_key "t:st:sov", outcome_no, outcome_name, odd, mbs, fetched_at) model/piyasa/harman
+    pazarları. Canlıda satırlar iddaa bülteninden, scout backtest'inde geçmiş kapanış oranlarından gelir."""
+    groups: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
         groups.setdefault(r["market_key"], []).append(r)
 
@@ -258,7 +266,8 @@ def iddaa_markets(con: sqlite3.Connection, event_id: int, sm_model: np.ndarray, 
 
 
 def predict_match(con: sqlite3.Connection, fm: FittedModels, match: sqlite3.Row, n_sims: int = N_SIMS,
-                  with_sim: bool = True) -> dict[str, Any] | None:
+                  with_sim: bool = True, market_rows: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    """`market_rows` verilirse iddaa bülteni yerine bu oran satırları kullanılır (geçmiş maç backtest'i)."""
     comp, home, away = match["league"], match["home_id"], match["away_id"]
     neutral = bool(match["neutral"])
     rates = fm.goals.rates(comp, home, away, neutral)
@@ -305,12 +314,16 @@ def predict_match(con: sqlite3.Connection, fm: FittedModels, match: sqlite3.Row,
                        "lines": {str(L): dict(zip(("Alt", "Üst"), mk.corner_over_prob(cm[0], cm[1], fm.corners.k, L)))
                                  for L in (7.5, 8.5, 9.5, 10.5, 11.5)}}
 
-    ev = con.execute(
+    iddaa = None
+    ev = None if market_rows is not None else con.execute(
         """SELECT id, mbs, competition_id FROM iddaa_events WHERE espn_match_id=? AND active=1 AND is_live=0
            ORDER BY match_score DESC LIMIT 1""",
         (match["id"],),
     ).fetchone()
-    iddaa = None
+    if market_rows:
+        mkts, minfo = markets_from_rows(market_rows, sm, j, p1, fm.goals.rho, corners, blend_w, validated, (lh, la))
+        if mkts:
+            iddaa = {"event_id": None, "mbs": market_rows[0].get("mbs"), "markets": mkts, "market_model": minfo}
     if ev:
         mkts, minfo = iddaa_markets(con, ev["id"], sm, j, p1, fm.goals.rho, corners, blend_w, validated, (lh, la))
         if mkts:

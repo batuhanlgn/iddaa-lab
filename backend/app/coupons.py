@@ -323,6 +323,24 @@ def _current_weight(con: sqlite3.Connection) -> float:
     return _blend_weight(con)[0]
 
 
+def scout_approved(con: sqlite3.Connection, preds: list[dict[str, Any]]) -> dict[tuple[str, str, str], Selection]:
+    """Scout hükmü "öneri" olan maçların önerilen seçimi: (maç, pazar anahtarı, sonuç) -> aday seçim."""
+    from .context import cached_context  # geç içe aktarma: context -> scout -> coupons
+
+    out: dict[tuple[str, str, str], Selection] = {}
+    for p in preds:
+        if not p.get("covered") or not p.get("iddaa"):
+            continue
+        pick = ((cached_context(con, p)["scout"] or {}).get("verdict") or {}).get("pick")
+        if not pick:
+            continue
+        sel = next((c for c in candidates([p], require_confidence=False, require_fresh=False)
+                    if c.market_key == pick["market_key"] and c.outcome_name == pick["selection"]), None)
+        if sel is not None:
+            out[(sel.match_id, sel.market_key, sel.outcome_name)] = sel
+    return out
+
+
 def generate(con: sqlite3.Connection, days: float = 3.0, archive: bool = False) -> dict[str, Any]:
     w_now = _current_weight(con)
     # Yalnızca güncel harman ağırlığıyla hesaplanmış tahminler (kalibrasyon sonrası eski tahminler kullanılmaz)
@@ -334,8 +352,12 @@ def generate(con: sqlite3.Connection, days: float = 3.0, archive: bool = False) 
     exp_note = (" DENEYSEL: model-piyasa harmanı henüz ileriye dönük doğrulanmadı; beklenen değer tahmini güvenilir değildir."
                 if experimental else "")
     live = live_odds(con)
+    # Kullanıcı tercihi (16 Eki 2026): kuponlara yalnız scout'un onayladığı seçimler girer (kanıtlar aynı yönde).
+    approved = scout_approved(con, preds)
+    scout_matches = {k[0] for k in approved}
     # Tahmin anındaki oran hâlâ bültende ve aynıysa aday olur (kalkmış/değişmiş oranla kupon yok)
-    cands = [c for c in candidates(preds) if c.odd >= MIN_SELECTION_ODDS and _still_offered(c, live)]
+    cands = [c for c in candidates(preds) if c.odd >= MIN_SELECTION_ODDS and _still_offered(c, live)
+             and (c.match_id, c.market_key, c.outcome_name) in approved]
     kinds: list[dict[str, Any]] = []
 
     # 1) Değer kuponu: modelle uyumlu (olasılık ≥ %40), makul oranlı ve harmanlı EV'si eşiği geçen seçimler
@@ -355,18 +377,12 @@ def generate(con: sqlite3.Connection, days: float = 3.0, archive: bool = False) 
     })
 
     # 2) Yüksek olasılık kuponu: maçların model önerileri (bültendekiyle aynı), en emin olunan 3 maç
-    hp = []
-    for p in preds:
-        if not p.get("covered") or p["model"]["confidence"] in ("düşük", "yok"):
-            continue
-        pk = model_pick(p)
-        if pk is not None and pk.odd >= MIN_SELECTION_ODDS and _still_offered(pk, live):
-            hp.append(pk)
+    hp = [pk for pk in approved.values() if pk.odd >= MIN_SELECTION_ODDS and _still_offered(pk, live)]
     sel = _best_size(sorted(hp, key=lambda c: c.p_model, reverse=True), (3,))
     kinds.append({
         "kind": "olasilik", "title": "Yüksek olasılık kuponu", "experimental": False,
-        "description": "Bültendeki model önerilerinden modelin en emin olduğu 3 maç (net favori -> maç sonucu, değilse çifte şans ya da gol pazarı). Yüksek tutma olasılığı değer anlamına gelmez.",
-        "empty_reason": None if sel else "MBS'yi sağlayan 3 uygun seçim yok.",
+        "description": "Önerilerden modelin en emin olduğu 3 maç (net favori -> maç sonucu, değilse çifte şans ya da gol pazarı). Yüksek tutma olasılığı değer anlamına gelmez.",
+        "empty_reason": None if sel else "Scout'un onayladığı, MBS'yi sağlayan 3 seçim yok.",
         **combine(sel),
     })
 
@@ -427,7 +443,8 @@ def generate(con: sqlite3.Connection, days: float = 3.0, archive: bool = False) 
     })
 
     # 7) Oyuncu kuponu: simülasyondan, farklı maçlardan en olası oyuncu tahminleri (adil oranla)
-    ranked_players = _best_per_match(player_candidates(preds), lambda c: c.p_blend)
+    ranked_players = _best_per_match([c for c in player_candidates(preds) if c.match_id in scout_matches],
+                                     lambda c: c.p_blend)
     sel = ranked_players[:3] if len(ranked_players) >= 3 else []
     kinds.append({
         "kind": "oyuncu", "title": "Oyuncu kuponu", "experimental": False,
@@ -437,6 +454,10 @@ def generate(con: sqlite3.Connection, days: float = 3.0, archive: bool = False) 
         "empty_reason": None if sel else "Uygun oyuncu tahmini yok.",
         **combine(sel),
     })
+
+    for k in kinds:
+        k["description"] = f"Yalnız scout'un onayladığı seçimler (kanıtlar aynı yönde). {k['description']}"
+        k["scout_gated"] = True
 
     created = _iso(datetime.now(timezone.utc))
     # "Günün kuponu": her tür için İstanbul gününde ilk oluşturulan (boş olmayan) kupon kilitlenir ve gün boyu

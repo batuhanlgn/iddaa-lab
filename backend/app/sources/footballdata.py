@@ -105,6 +105,19 @@ ODDS_TRIPLES: tuple[tuple[str, str, str, str], ...] = (
 )
 
 
+# 2.5 gol Alt/Üst çifti önceliği (scout backtest'inde gol pazarı oranı): kapanış > açılış
+OU25_PAIRS: tuple[tuple[str, str], ...] = (
+    ("AvgC>2.5", "AvgC<2.5"),
+    ("PC>2.5", "PC<2.5"),
+    ("B365C>2.5", "B365C<2.5"),
+    ("Avg>2.5", "Avg<2.5"),
+    ("BbAv>2.5", "BbAv<2.5"),
+    ("P>2.5", "P<2.5"),
+    ("B365>2.5", "B365<2.5"),
+)
+OU_OVERROUND_MAX = 1.20
+
+
 def league_info(slug: str) -> tuple[str, str]:
     """Lig kısaltması -> (ad, ülke). Önce proje lig listesi, sonra football-data tablosu."""
     lg = LEAGUE_BY_SLUG.get(slug)
@@ -199,6 +212,17 @@ def pick_odds(row: dict[str, str | None]) -> tuple[str, float, float, float] | N
     return None
 
 
+def pick_ou25(row: dict[str, str | None]) -> tuple[float, float] | None:
+    """İlk geçerli 2.5 gol (Üst, Alt) oran çifti; yoksa None (ek lig dosyalarında bu pazar yok)."""
+    for over_col, under_col in OU25_PAIRS:
+        ov, un = _odd(row.get(over_col)), _odd(row.get(under_col))
+        if ov is None or un is None:
+            continue
+        if OVERROUND_MIN <= 1.0 / ov + 1.0 / un <= OU_OVERROUND_MAX:
+            return ov, un
+    return None
+
+
 @dataclass
 class HistMatch:
     league: str
@@ -213,6 +237,8 @@ class HistMatch:
     ox: float
     o2: float
     odds_src: str
+    o_over25: float | None = None
+    o_under25: float | None = None
 
     @property
     def key(self) -> str:
@@ -258,7 +284,9 @@ def parse_csv(text: str, league: str, *, min_date: str | None = None) -> list[Hi
         hthg, htag = _int(row.get("HTHG")), _int(row.get("HTAG"))
         if hthg is None or htag is None or hthg > hg or htag > ag:
             hthg = htag = None
-        m = HistMatch(league, d, home, away, hg, ag, hthg, htag, o1, ox, o2, src)
+        ou = pick_ou25(row)
+        m = HistMatch(league, d, home, away, hg, ag, hthg, htag, o1, ox, o2, src,
+                      ou[0] if ou else None, ou[1] if ou else None)
         if m.key in seen:  # aynı dosyada yinelenen satır
             continue
         seen.add(m.key)

@@ -16,6 +16,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from . import coupons, db
+from .context import cached_context, match_context, scout_brief
 from .config import DATA_DIR, LEAGUES, ROOT, TOKEN_PATH
 from .model import markets as mk
 
@@ -219,7 +220,7 @@ def matches(days: float = Query(7, ge=0.1, le=14), league: str | None = Query(No
             continue
         row = _row_summary(p)
         if p.get("covered"):
-            row["scout"] = _scout_brief(_cached_context(c, p)["scout"])
+            row["scout"] = scout_brief(cached_context(c, p)["scout"])
         items.append(row)
     market_only: list[dict[str, Any]] = []
     if include_market_only:
@@ -247,65 +248,6 @@ def matches(days: float = Query(7, ge=0.1, le=14), league: str | None = Query(No
     return {"items": items, "market_only": market_only,
             "leagues": [{"slug": s, "name": n, "country": ct} for s, n, ct in leagues],
             "generated_at": _iso(datetime.now(timezone.utc))}
-
-
-def _form(c: Any, m: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    """Son karşılaşmalar ve form (iki takımın maç öncesi son 6 maçı)."""
-    form = {}
-    for side in ("home", "away"):
-        tid = m[side]["id"]
-        rows = c.execute(
-            """SELECT m.id, m.date_utc, m.league, m.home_id, m.away_id, m.home_goals, m.away_goals, th.name hn, ta.name an
-               FROM matches m JOIN teams th ON th.id=m.home_id JOIN teams ta ON ta.id=m.away_id
-               WHERE m.completed=1 AND (m.home_id=? OR m.away_id=?) AND m.date_utc < ? ORDER BY m.date_utc DESC LIMIT 6""",
-            (tid, tid, m["date_utc"]),
-        ).fetchall()
-        form[side] = [{**dict(x), "is_home": x["home_id"] == tid} for x in rows]
-    return form
-
-
-_CTX_TTL_S = 600
-_ctx_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
-
-
-def _cached_context(c: Any, p: dict[str, Any]) -> dict[str, Any]:
-    """Bülten her maç için bağlam kurar (~10 ms/maç); aynı tahmin için 10 dakika bellekte tutulur."""
-    key = (p["match"]["id"], str(p.get("created_at")))
-    hit = _ctx_cache.get(key)
-    now = time.monotonic()
-    if hit is not None and now - hit[0] < _CTX_TTL_S:
-        return hit[1]
-    ctx = match_context(c, p)
-    if len(_ctx_cache) > 2000:
-        _ctx_cache.clear()
-    _ctx_cache[key] = (now, ctx)
-    return ctx
-
-
-def match_context(c: Any, p: dict[str, Any]) -> dict[str, Any]:
-    """Maç sayfası bağlamı: form, puan durumu, karşılıklı geçmiş, benzer oranlı geçmiş maçlar ve scout raporu."""
-    from .league_info import head_to_head, match_standings
-    from .scout import build_scout
-    from .similar_odds import similar_for_payload
-
-    m = p["match"]
-    form = _form(c, m)
-    standings = match_standings(c, m["league"], m["home"]["id"], m["away"]["id"])
-    h2h = head_to_head(c, m["home"]["id"], m["away"]["id"], m["date_utc"])
-    similar = similar_for_payload(c, p) if p.get("covered") else None
-    scout = (build_scout({**p, "form": form}, form=form, standings=standings, h2h=h2h, similar=similar)
-             if p.get("covered") else None)
-    return {"form": form, "standings": standings, "h2h": h2h, "similar": similar, "scout": scout}
-
-
-def _scout_brief(scout: dict[str, Any] | None) -> dict[str, Any] | None:
-    if scout is None:
-        return None
-    v = scout["verdict"]
-    pick = v.get("pick")
-    return {"verdict": v["verdict"], "headline": v["headline"], "reason": v["reason"], "confidence": v.get("confidence"),
-            "selection_text": pick["selection_text"] if pick else None, "odd": pick["odd"] if pick else None,
-            "p_model": pick["p_model"] if pick else None}
 
 
 @app.get("/api/matches/{match_id}")
@@ -383,6 +325,7 @@ def performance() -> dict[str, Any]:
         "tracking": db.meta_get(c, "tracking"),
         "live_picks": _live_summary(c),
         "player_calibration": db.meta_get(c, "player_calibration"),
+        "scout_backtest": db.meta_get(c, "scout_backtest"),
         "coupons": coupons.history(c, limit=500)["summary"],
         "league_names": {lg.slug: f"{lg.country} · {lg.name}" for lg in LEAGUES},
     }

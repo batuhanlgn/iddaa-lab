@@ -287,6 +287,8 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("matches", "ft90_home", "ALTER TABLE matches ADD COLUMN ft90_home INTEGER"),
     ("matches", "ft90_away", "ALTER TABLE matches ADD COLUMN ft90_away INTEGER"),
     ("iddaa_events", "active", "ALTER TABLE iddaa_events ADD COLUMN active INTEGER NOT NULL DEFAULT 1"),
+    ("hist_odds_matches", "o_over25", "ALTER TABLE hist_odds_matches ADD COLUMN o_over25 REAL"),
+    ("hist_odds_matches", "o_under25", "ALTER TABLE hist_odds_matches ADD COLUMN o_under25 REAL"),
 )
 
 

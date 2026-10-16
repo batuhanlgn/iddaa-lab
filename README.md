@@ -60,7 +60,19 @@ ve ilerleme **Veri** sayfasında görünür. Uygulama açıkken veriler kendili�
   - Model ile geometrik olarak harmanlanır; ağırlık, oran arşivi yeterince birikince kendiliğinden kalibre olur.
   - EV = p × oran − 1.
 
+## Scout raporu
+
+- Her maç için kural tabanlı, gerekçeli değerlendirme: güç dengesi, form, lig konumu, karşılıklı geçmiş, hücum/savunma
+  profili, piyasa (benzer oranlı geçmiş maçlar dahil) ve riskler.
+- Öneri yalnız bölümler aynı yönü gösterdiğinde ve en az bir bağımsız bölüm (form, lig, karşılıklı geçmiş) desteklediğinde
+  verilir; aksi halde açıkça **Pas**. Bülten ve kuponlar scout hükmünü kullanır.
+- **Scout backtest** (haftalık backtest işi): son 365 gün walk-forward; tahmin, form, puan durumu (sonuçlardan),
+  karşılıklı geçmiş ve benzer oranlar maç tarihi itibarıyla. Oranlar football-data kapanışı (MS, 2.5 A/Ü); getiri hem
+  kapanış oranıyla hem iddaa marjına çevrilmiş oranla raporlanır (**Performans** sayfası).
+
 ## Kuponlar
+
+- Kuponlara yalnız scout'un onayladığı seçimler girer (oyuncu kuponunda: scout'un öneri verdiği maçlar).
 
 - **Değer**, **Yüksek olasılık** ve **Dengeli** kuponlar üretilir.
 - Yalnızca backtest'te doğrulanmış pazar aileleri kullanılır.
