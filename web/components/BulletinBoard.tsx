@@ -43,10 +43,13 @@ export default function BulletinBoard({ data, nowIso }: { data: MatchesResponse;
     let xs = data.items.filter((m) => day === "all" || dayKey(m.match.date_utc) === day);
     if (league !== "all") xs = xs.filter((m) => m.match.league === league);
     if (onlyIddaa) xs = xs.filter((m) => m.iddaa);
-    if (onlyValue) xs = xs.filter((m) => m.iddaa?.best_value != null);
+    // Scout raporu olan maçlarda öneri = scout hükmü (kanıtlar aynı yöndeyse); eski veride model önerisi
+    const pickP = (m: MatchRow): number | null =>
+      m.scout ? (m.scout.verdict === "oneri" ? m.scout.p_model : null) : (m.iddaa?.best_value?.p_blend ?? null);
+    if (onlyValue) xs = xs.filter((m) => pickP(m) !== null);
     if (q) xs = xs.filter((m) => `${m.match.home.name} ${m.match.away.name}`.toLocaleLowerCase("tr").includes(q));
     const certainty = (m: MatchRow) => Math.max(...Object.values(m.ms ?? { x: 0 }));
-    if (sort === "value") xs = [...xs].sort((a, b) => (b.iddaa?.best_value?.p_blend ?? -9) - (a.iddaa?.best_value?.p_blend ?? -9));
+    if (sort === "value") xs = [...xs].sort((a, b) => (pickP(b) ?? -9) - (pickP(a) ?? -9));
     if (sort === "certainty") xs = [...xs].sort((a, b) => certainty(b) - certainty(a));
     return xs;
   }, [data.items, day, league, onlyIddaa, onlyValue, sort, query]);
@@ -246,7 +249,27 @@ function Row({ m }: { m: MatchRow }) {
       </div>
 
       <div className="flex min-w-0 flex-col gap-1 text-xs">
-        {best ? (
+        {m.scout ? (
+          m.scout.verdict === "oneri" ? (
+            <div className="flex flex-wrap items-center gap-1.5" title={`Scout: ${m.scout.reason}`}>
+              <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wider text-accent">
+                ✓ Scout · {m.scout.confidence}
+              </span>
+              <span className="truncate text-ink-2">
+                <b className="text-ink">{m.scout.selection_text}</b>{" "}
+                {m.scout.odd !== null && <span className="num">@{odd(m.scout.odd)}</span>}
+                {m.scout.p_model !== null && <span className="num"> · {pct(m.scout.p_model)}</span>}
+              </span>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center gap-1.5" title={m.scout.reason}>
+              <span className="rounded border border-line px-1.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wider text-muted">
+                ‖ Pas
+              </span>
+              <span className="truncate text-muted">{m.scout.reason}</span>
+            </div>
+          )
+        ) : best ? (
           <div className="flex flex-wrap items-center gap-1.5" title={`Model önerisi · EV ${(best.ev * 100).toFixed(1)}%${best.validated ? "" : " · doğrulanmamış pazar"}`}>
             <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[0.65rem] font-semibold uppercase tracking-wider text-accent">Öneri</span>
             <span className="truncate text-ink-2">

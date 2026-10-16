@@ -826,15 +826,25 @@ def _similar_items(similar: dict[str, Any], q: dict[str, float], c: _Ctx) -> lis
         if low:
             items.append(_item(txt + " (örneklem küçük, yalnızca bilgi).", "neutral"))
         else:
-            edge_k = max(("1", "0", "2"), key=lambda k: f[k] - q[k])
-            edge = f[edge_k] - q[edge_k]
-            if edge >= SIMILAR_EDGE_MIN:
-                side = _ms_side(edge_k)
-                label = "beraberlik" if side == "draw" else c.name(side)
-                items.append(_item(f"{txt}; {label} bu oranlarda piyasanın fiyatladığından {_pct(edge)} daha sık gerçekleşmiş.",
+            # Kıyas tabanı: varsa eşleşen maçlarda piyasanın beklediği (pool_implied), yoksa bugünkü piyasa olasılığı
+            pool = similar.get("pool_implied")
+            use_pool = isinstance(pool, dict) and all(isinstance(pool.get(k), (int, float)) for k in ("1", "0", "2"))
+            base = {k: float(pool[k]) for k in ("1", "0", "2")} if use_pool and isinstance(pool, dict) else q
+            base_txt = "o maçlarda piyasanın beklediğinden" if use_pool else "bugünkü piyasa fiyatından"
+            edge_k = max(("1", "0", "2"), key=lambda k: f[k] - base[k])
+            edge = f[edge_k] - base[edge_k]
+            ci = similar.get("outcomes_ci95")
+            ci_k = ci.get(edge_k) if isinstance(ci, dict) else None
+            significant = not (isinstance(ci_k, (list, tuple)) and len(ci_k) == 2 and float(ci_k[0]) <= base[edge_k])
+            side = _ms_side(edge_k)
+            label = "beraberlik" if side == "draw" else c.name(side)
+            if edge >= SIMILAR_EDGE_MIN and significant:
+                items.append(_item(f"{txt}; {label} {base_txt} {_pct(edge)} daha sık gerçekleşmiş.",
                                    side, SIMILAR_MAX_WEIGHT * _strength(edge, SIMILAR_EDGE_MIN, SIMILAR_EDGE_FULL)))
+            elif edge >= SIMILAR_EDGE_MIN:
+                items.append(_item(f"{txt}; {label} lehine {_pct(edge)} fark var ama güven aralığı bunu desteklemiyor.", "neutral"))
             else:
-                items.append(_item(txt + "; piyasa fiyatıyla uyumlu.", "neutral"))
+                items.append(_item(txt + "; fiyatlamayla uyumlu.", "neutral"))
     over = similar.get("over25")
     btts = similar.get("btts")
     if isinstance(over, (int, float)):

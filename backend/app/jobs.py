@@ -133,10 +133,11 @@ def _standings_safe(con, progress: Progress) -> None:
 
 
 def _league_info_safe(con, progress: Progress) -> None:
-    """Puan durumu + karşılıklı geçmiş: yalnız görüntüleme verisi; hata ana güncellemeyi durdurmaz."""
+    """Puan durumu + karşılıklı geçmiş + benzer oran havuzu: görüntüleme/scout verisi; hata ana güncellemeyi durdurmaz."""
     from .league_info import ingest_h2h, ingest_standings
+    from .similar_odds import ingest_history
 
-    for step in (ingest_standings, ingest_h2h):
+    for step in (ingest_standings, ingest_h2h, ingest_history):
         try:
             asyncio.run(step(con, progress))
         except Exception as e:  # noqa: BLE001 - kaynak hatası iş kaydına yazılır, diğer adımlar sürer

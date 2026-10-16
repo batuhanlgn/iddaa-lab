@@ -8,6 +8,8 @@ import MatchHeader from "@/components/match/MatchHeader";
 import ModelNotes from "@/components/match/ModelNotes";
 import Outcomes from "@/components/match/Outcomes";
 import ScoreHeatmap from "@/components/match/ScoreHeatmap";
+import ScoutReport from "@/components/match/ScoutReport";
+import SimilarOdds from "@/components/match/SimilarOdds";
 import SimulationPanel from "@/components/match/SimulationPanel";
 import SideInfo from "@/components/match/SideInfo";
 import { EmptyState, SectionTitle, SkeletonRows } from "@/components/ui";
@@ -56,6 +58,8 @@ async function MatchData({ params }: Pick<PageProps<"/mac/[id]">, "params">) {
         </section>
       </div>
 
+      {d.scout && <ScoutReport scout={d.scout} />}
+
       <section className="rise" style={{ animationDelay: "160ms" }}>
         <SectionTitle right={<span className="kicker">iddaa oranı · model · piyasa · harman</span>}>iddaa pazarları</SectionTitle>
         {d.iddaa && d.iddaa.markets.length > 0 ? (
@@ -66,6 +70,8 @@ async function MatchData({ params }: Pick<PageProps<"/mac/[id]">, "params">) {
           </EmptyState>
         )}
       </section>
+
+      {d.similar !== undefined && <SimilarOdds data={d.similar} />}
 
       <section className="rise" style={{ animationDelay: "200ms" }}>
         <SectionTitle right={<span className="kicker">{d.sim ? `${d.sim.n_sims.toLocaleString("tr-TR")} simülasyon` : ""}</span>}>

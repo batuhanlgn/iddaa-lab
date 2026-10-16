@@ -1,4 +1,6 @@
 // Arka uç (FastAPI) yanıt tipleri — backend/app/api.py, model/pipeline.py ve coupons.py ile birebir.
+import type { ScoutReportData } from "./scout-types";
+import type { SimilarOddsData } from "./similar-types";
 
 export type Confidence = "yüksek" | "orta" | "düşük" | "yok";
 
@@ -36,6 +38,16 @@ export interface BestValue {
   validated: boolean;
 }
 
+export interface ScoutBrief {
+  verdict: "oneri" | "pas";
+  headline: string;
+  reason: string;
+  confidence: "yüksek" | "orta" | null;
+  selection_text: string | null;
+  odd: number | null;
+  p_model: number | null;
+}
+
 export interface MatchRow {
   match: MatchInfo;
   covered: boolean;
@@ -58,6 +70,8 @@ export interface MatchRow {
     n_markets: number;
   };
   top_players?: { side: "home" | "away"; name: string; p_sot_1: number; p_goal: number }[];
+  /** Scout hükmü özeti (api._scout_brief); öneri yalnız kanıtlar aynı yönü gösterdiğinde */
+  scout?: ScoutBrief | null;
 }
 
 export interface MarketOnlyRow {
@@ -243,6 +257,8 @@ export interface MatchDetail {
   /** Güncellemeden önce dışa aktarılmış eski statik veride bulunmayabilir */
   standings?: MatchStandings | null;
   h2h?: H2HMatch[];
+  similar?: SimilarOddsData | null;
+  scout?: ScoutReportData | null;
 }
 
 // ---------------------------------------------------------------- puan durumu ve karşılıklı geçmiş

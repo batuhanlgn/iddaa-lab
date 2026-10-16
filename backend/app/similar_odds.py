@@ -119,7 +119,9 @@ def _iddaa_rows(con: sqlite3.Connection) -> list[tuple[Any, ...]]:
     """Kendi arşivimizden kapanış MS oranlı, bitmiş maçlar. Aynı ESPN maçına bağlı birden çok etkinlik varsa
     sonuncusu kalır (src_key = ESPN maç kimliği)."""
     out: dict[str, tuple[Any, ...]] = {}
-    for r in con.execute(_IDDAA_CLOSING_SQL):
+    cur = con.cursor()
+    cur.row_factory = sqlite3.Row
+    for r in cur.execute(_IDDAA_CLOSING_SQL):
         if r["hg"] is None or r["ag"] is None or None in (r["o1"], r["ox"], r["o2"]):
             continue
         o1, ox, o2 = float(r["o1"]), float(r["ox"]), float(r["o2"])

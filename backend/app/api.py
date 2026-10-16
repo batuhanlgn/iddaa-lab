@@ -213,7 +213,14 @@ def matches(days: float = Query(7, ge=0.1, le=14), league: str | None = Query(No
             include_market_only: bool = Query(True)) -> dict[str, Any]:
     c = con()
     preds = coupons.latest_predictions(c, days, min_lead_minutes=-180)
-    items = [_row_summary(p) for p in preds if league is None or p["match"]["league"] == league]
+    items = []
+    for p in preds:
+        if league is not None and p["match"]["league"] != league:
+            continue
+        row = _row_summary(p)
+        if p.get("covered"):
+            row["scout"] = _scout_brief(_cached_context(c, p)["scout"])
+        items.append(row)
     market_only: list[dict[str, Any]] = []
     if include_market_only:
         now = datetime.now(timezone.utc)
@@ -242,6 +249,65 @@ def matches(days: float = Query(7, ge=0.1, le=14), league: str | None = Query(No
             "generated_at": _iso(datetime.now(timezone.utc))}
 
 
+def _form(c: Any, m: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    """Son karşılaşmalar ve form (iki takımın maç öncesi son 6 maçı)."""
+    form = {}
+    for side in ("home", "away"):
+        tid = m[side]["id"]
+        rows = c.execute(
+            """SELECT m.id, m.date_utc, m.league, m.home_id, m.away_id, m.home_goals, m.away_goals, th.name hn, ta.name an
+               FROM matches m JOIN teams th ON th.id=m.home_id JOIN teams ta ON ta.id=m.away_id
+               WHERE m.completed=1 AND (m.home_id=? OR m.away_id=?) AND m.date_utc < ? ORDER BY m.date_utc DESC LIMIT 6""",
+            (tid, tid, m["date_utc"]),
+        ).fetchall()
+        form[side] = [{**dict(x), "is_home": x["home_id"] == tid} for x in rows]
+    return form
+
+
+_CTX_TTL_S = 600
+_ctx_cache: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+
+
+def _cached_context(c: Any, p: dict[str, Any]) -> dict[str, Any]:
+    """Bülten her maç için bağlam kurar (~10 ms/maç); aynı tahmin için 10 dakika bellekte tutulur."""
+    key = (p["match"]["id"], str(p.get("created_at")))
+    hit = _ctx_cache.get(key)
+    now = time.monotonic()
+    if hit is not None and now - hit[0] < _CTX_TTL_S:
+        return hit[1]
+    ctx = match_context(c, p)
+    if len(_ctx_cache) > 2000:
+        _ctx_cache.clear()
+    _ctx_cache[key] = (now, ctx)
+    return ctx
+
+
+def match_context(c: Any, p: dict[str, Any]) -> dict[str, Any]:
+    """Maç sayfası bağlamı: form, puan durumu, karşılıklı geçmiş, benzer oranlı geçmiş maçlar ve scout raporu."""
+    from .league_info import head_to_head, match_standings
+    from .scout import build_scout
+    from .similar_odds import similar_for_payload
+
+    m = p["match"]
+    form = _form(c, m)
+    standings = match_standings(c, m["league"], m["home"]["id"], m["away"]["id"])
+    h2h = head_to_head(c, m["home"]["id"], m["away"]["id"], m["date_utc"])
+    similar = similar_for_payload(c, p) if p.get("covered") else None
+    scout = (build_scout({**p, "form": form}, form=form, standings=standings, h2h=h2h, similar=similar)
+             if p.get("covered") else None)
+    return {"form": form, "standings": standings, "h2h": h2h, "similar": similar, "scout": scout}
+
+
+def _scout_brief(scout: dict[str, Any] | None) -> dict[str, Any] | None:
+    if scout is None:
+        return None
+    v = scout["verdict"]
+    pick = v.get("pick")
+    return {"verdict": v["verdict"], "headline": v["headline"], "reason": v["reason"], "confidence": v.get("confidence"),
+            "selection_text": pick["selection_text"] if pick else None, "odd": pick["odd"] if pick else None,
+            "p_model": pick["p_model"] if pick else None}
+
+
 @app.get("/api/matches/{match_id}")
 def match_detail(match_id: str) -> dict[str, Any]:
     if not match_id.isdigit() or len(match_id) > 20:
@@ -261,23 +327,7 @@ def match_detail(match_id: str) -> dict[str, Any]:
         ):
             hist.append(dict(h))
     p["odds_history_ms"] = hist
-    # Son karşılaşmalar ve form
-    m = p["match"]
-    form = {}
-    for side in ("home", "away"):
-        tid = m[side]["id"]
-        rows = c.execute(
-            """SELECT m.id, m.date_utc, m.league, m.home_id, m.away_id, m.home_goals, m.away_goals, th.name hn, ta.name an
-               FROM matches m JOIN teams th ON th.id=m.home_id JOIN teams ta ON ta.id=m.away_id
-               WHERE m.completed=1 AND (m.home_id=? OR m.away_id=?) AND m.date_utc < ? ORDER BY m.date_utc DESC LIMIT 6""",
-            (tid, tid, m["date_utc"]),
-        ).fetchall()
-        form[side] = [{**dict(x), "is_home": x["home_id"] == tid} for x in rows]
-    p["form"] = form
-    from .league_info import head_to_head, match_standings
-
-    p["standings"] = match_standings(c, m["league"], m["home"]["id"], m["away"]["id"])
-    p["h2h"] = head_to_head(c, m["home"]["id"], m["away"]["id"], m["date_utc"])
+    p.update(match_context(c, p))
     return p
 
 

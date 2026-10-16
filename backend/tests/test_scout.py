@@ -348,6 +348,13 @@ def test_similar_odds_used_and_low_sample_ignored():
     piy2 = next(s for s in build_scout(p, form=form, standings=None, h2h=[], similar=sim_low)["sections"] if s["key"] == "piyasa")
     sim_items = [it for it in piy2["items"] if "Benzer oranlı" in it["text"]]
     assert sim_items and all(it["side"] == "neutral" for it in sim_items)
+    # Eşleşen maçlarda piyasa zaten bunu bekliyorduysa (pool_implied) ya da güven aralığı tutmuyorsa yön sinyali yok
+    sim_pool = {**sim_ok, "pool_implied": {"1": 0.70, "0": 0.19, "2": 0.11}}
+    piy_pool = next(s for s in build_scout(p, form=form, standings=None, h2h=[], similar=sim_pool)["sections"] if s["key"] == "piyasa")
+    assert all(it["side"] == "neutral" for it in piy_pool["items"] if "Benzer oranlı" in it["text"])
+    sim_ci = {**sim_ok, "outcomes_ci95": {"1": [0.60, 0.80], "0": [0.1, 0.25], "2": [0.05, 0.15]}}
+    piy_ci = next(s for s in build_scout(p, form=form, standings=None, h2h=[], similar=sim_ci)["sections"] if s["key"] == "piyasa")
+    assert all(it["side"] == "neutral" for it in piy_ci["items"] if "Benzer oranlı" in it["text"])
     piy3 = next(s for s in build_scout(p, form=form, standings=None, h2h=[], similar={"foo": 1})["sections"] if s["key"] == "piyasa")
     assert not any("Benzer" in it["text"] for it in piy3["items"])
 

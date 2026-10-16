@@ -294,6 +294,9 @@ def init_db() -> None:
     con = connect()
     try:
         con.executescript(SCHEMA)
+        from .similar_odds import SCHEMA_SQL as SIMILAR_SCHEMA  # geç içe aktarma: similar_odds db'yi kullanır
+
+        con.executescript(SIMILAR_SCHEMA)
         for table, column, ddl in MIGRATIONS:
             cols = {r["name"] for r in con.execute(f"PRAGMA table_info({table})")}
             if column not in cols:
