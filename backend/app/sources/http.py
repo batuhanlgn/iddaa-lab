@@ -31,7 +31,9 @@ class PoliteClient:
         concurrency: int = HTTP_CONCURRENCY,
         min_interval: float = HTTP_MIN_INTERVAL_S,
         timeout: float = 30.0,
+        max_retries: int = HTTP_MAX_RETRIES,
     ) -> None:
+        self._max_retries = max_retries
         self._sem = asyncio.Semaphore(concurrency)
         self._interval = min_interval
         self._base_interval = min_interval
@@ -67,7 +69,7 @@ class PoliteClient:
 
     async def get_json(self, url: str, params: dict[str, str] | None = None) -> Any:
         last_err: FetchError | None = None
-        for attempt in range(HTTP_MAX_RETRIES):
+        for attempt in range(self._max_retries):
             async with self._sem:
                 await self._wait_slot()
                 self.requests += 1
@@ -89,7 +91,7 @@ class PoliteClient:
                     else:
                         raise FetchError(url, resp.status_code, resp.text[:200])
             backoff = min(30.0, (2**attempt) * 0.75) * random.uniform(0.8, 1.3)
-            log.warning("Tekrar denenecek (%s/%s) %s: %s", attempt + 1, HTTP_MAX_RETRIES, url, last_err)
+            log.warning("Tekrar denenecek (%s/%s) %s: %s", attempt + 1, self._max_retries, url, last_err)
             await asyncio.sleep(backoff)
         self.failures += 1
         assert last_err is not None

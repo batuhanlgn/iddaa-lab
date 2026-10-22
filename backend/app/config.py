@@ -167,7 +167,12 @@ MIN_SELECTION_ODDS = 1.20
 # Karşılıklı geçmiş (maç sayfası): gösterilecek maç sayısı; eksikse ESPN takım fikstüründen kaç sezon geriye gidilir
 H2H_LIMIT = 5
 H2H_MAX_SEASONS_BACK = 8
-H2H_MAX_REQUESTS = 400  # iş başına üst sınır (ilk doldurma birkaç güncellemeye yayılır)
+H2H_MAX_REQUESTS = 120  # iş başına üst sınır (eksikler birkaç güncellemeye yayılır)
+# ESPN takım fikstürü ucu yavaşladığında tam güncelleme saatlerce sürmesin (22 Eki 2026: 353 istek, 45 hata, 58 dk)
+H2H_TIME_BUDGET_S = 300
+H2H_RETRIES = 2
+H2H_BATCH = 40
+H2H_ERROR_RETRY_DAYS = 7  # hata veren (takım, sezon) bu kadar gün atlanır
 
 # Spor Toto (kullanıcı tercihi, 16 Eki 2026: haftalık kupon en fazla 3.000 TL)
 TOTO_BUDGET_TL = 3000.0

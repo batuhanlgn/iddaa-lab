@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import sqlite3
+import time
 from datetime import timedelta
 from typing import Any, Callable
 
 from . import db
-from .config import H2H_LIMIT, H2H_MAX_REQUESTS, H2H_MAX_SEASONS_BACK, LEAGUE_BY_SLUG, LEAGUES
+from .config import (H2H_BATCH, H2H_ERROR_RETRY_DAYS, H2H_LIMIT, H2H_MAX_REQUESTS, H2H_MAX_SEASONS_BACK, H2H_RETRIES,
+                     H2H_TIME_BUDGET_S, LEAGUE_BY_SLUG, LEAGUES)
 from .ingest import iso, utcnow
 from .sources import espn
 from .sources.http import FetchError, PoliteClient
@@ -176,8 +178,9 @@ def _earliest_season(con: sqlite3.Connection, team_id: str) -> int:
 async def ingest_h2h(con: sqlite3.Connection, progress: Progress, days: float = 7) -> dict[str, int]:
     """Yaklaşan maçlarda karşılıklı geçmiş 5'ten azsa ev sahibinin eski sezon fikstürlerini çeker.
 
-    Bitmiş sezonlar değişmez: her (takım, sezon) bir kez çekilir (`sched_done:` meta). İstek sayısı iş başına
-    sınırlıdır; ilk çalışmalarda eksikler birkaç güncellemeye yayılır."""
+    Bitmiş sezonlar değişmez: her (takım, sezon) bir kez çekilir (`sched_done:` meta). İstek sayısı ve süre iş başına
+    sınırlıdır (eksikler birkaç güncellemeye yayılır); hata veren (takım, sezon) H2H_ERROR_RETRY_DAYS gün atlanır."""
+    t0 = time.monotonic()
     now = utcnow()
     upcoming = con.execute(
         """SELECT DISTINCT home_id, away_id, date_utc FROM matches
@@ -188,15 +191,23 @@ async def ingest_h2h(con: sqlite3.Connection, progress: Progress, days: float = 
     pending = [(r["home_id"], r["away_id"], r["date_utc"]) for r in upcoming]
     stats = {"pairs": len(pending), "requests": 0, "rows": 0, "errors": 0}
     next_season: dict[str, int] = {}
-    async with PoliteClient() as client:
-        while pending and stats["requests"] < H2H_MAX_REQUESTS:
+    err_cutoff = iso(now - timedelta(days=H2H_ERROR_RETRY_DAYS))
+
+    def skip(team: str, season: int) -> bool:
+        if db.meta_get(con, f"sched_done:{team}:{season}"):
+            return True
+        err = db.meta_get(con, f"sched_err:{team}:{season}")
+        return bool(err) and err >= err_cutoff
+
+    async with PoliteClient(max_retries=H2H_RETRIES) as client:
+        while pending and stats["requests"] < H2H_MAX_REQUESTS and time.monotonic() - t0 < H2H_TIME_BUDGET_S:
             todo: dict[str, int] = {}
             still: list[tuple[str, str, str]] = []
             for home, away, date in pending:
                 if len(head_to_head(con, home, away, date)) >= H2H_LIMIT:
                     continue
                 season = next_season[home] if home in next_season else _earliest_season(con, home)
-                while season >= stop_season and db.meta_get(con, f"sched_done:{home}:{season}"):
+                while season >= stop_season and skip(home, season):
                     season -= 1
                 next_season[home] = season
                 if season < stop_season:
@@ -205,7 +216,7 @@ async def ingest_h2h(con: sqlite3.Connection, progress: Progress, days: float = 
                 still.append((home, away, date))
             if not todo:
                 break
-            batch = list(todo.items())[: H2H_MAX_REQUESTS - stats["requests"]]
+            batch = list(todo.items())[: min(H2H_BATCH, H2H_MAX_REQUESTS - stats["requests"])]
 
             async def one(team: str, season: int) -> tuple[str, int, list[dict[str, Any]] | None]:
                 try:
@@ -222,6 +233,7 @@ async def ingest_h2h(con: sqlite3.Connection, progress: Progress, days: float = 
                     next_season[team] = season - 1
                     if games is None:
                         stats["errors"] += 1
+                        db.meta_set(con, f"sched_err:{team}:{season}", fetched_at)
                         continue
                     for g in games:
                         con.execute(
@@ -233,5 +245,6 @@ async def ingest_h2h(con: sqlite3.Connection, progress: Progress, days: float = 
                     stats["rows"] += len(games)
                     db.meta_set(con, f"sched_done:{team}:{season}", fetched_at)
             pending = still
+    stats["seconds"] = round(time.monotonic() - t0)
     progress(f"Karşılıklı geçmiş: {stats}")
     return stats

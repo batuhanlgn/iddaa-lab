@@ -150,3 +150,32 @@ def test_head_to_head_merges_db_and_history_without_duplicates():
     h = head_to_head(con, "1", "2", "2026-10-18T17:00:00Z")
     assert [x["id"] for x in h] == ["m1", "h1"]
     assert h[0]["league_name"] == "Türkiye · Süper Lig"
+
+
+def test_ingest_h2h_marks_failed_seasons_and_skips_them(monkeypatch: pytest.MonkeyPatch):
+    import asyncio
+    from datetime import timedelta
+
+    from app import league_info as li
+    from app.ingest import iso, utcnow
+    from app.sources.http import FetchError
+
+    con = _mem_db()
+    con.execute("INSERT INTO teams(id, name) VALUES('1','Ev'),('2','Dep')")
+    kick = iso(utcnow() + timedelta(days=1))
+    con.execute(
+        """INSERT INTO matches(id, league, season, date_utc, state, completed, home_id, away_id, scoreboard_fetched_at)
+           VALUES('u1','tur.1',2026,?,'pre',0,'1','2','x')""", (kick,))
+    calls: list[tuple[str, int]] = []
+
+    async def failing(_client: object, team: str, season: int) -> dict:
+        calls.append((team, season))
+        raise FetchError("u", 502, "bad gateway")
+
+    monkeypatch.setattr(li.espn, "fetch_team_schedule", failing)
+    s1 = asyncio.run(li.ingest_h2h(con, lambda _m: None))
+    assert s1["errors"] == len(calls) > 0
+    assert all(db.meta_get(con, f"sched_err:{t}:{y}") for t, y in calls)
+    n_first = len(calls)
+    s2 = asyncio.run(li.ingest_h2h(con, lambda _m: None))  # hatalılar 7 gün atlanır: yeni istek yok
+    assert len(calls) == n_first and s2["requests"] == 0
