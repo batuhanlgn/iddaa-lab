@@ -5,6 +5,8 @@
 - Bazlar: lig taban oranları (as_of öncesi) ve basit Poisson (hiyerarşi/zaman ağırlığı zayıf, DC yok).
 - Pazar ailesi doğrulaması: model, değerlendirme diliminde taban orandan daha iyi log-loss ve kabul edilebilir
   kalibrasyon gösterirse o aile kupona açılır.
+- Korner ve kart aileleri (tune_aux + aux_walk_forward): her pazar türü ve birkaç çizgi ayrı ayrı lig taban oranına
+  karşı sınanır; aile ve pazar türü bayrakları aynı ölçütle (n ≥ 300, kazanç > 0,002, ECE < 0,03) verilir.
 """
 from __future__ import annotations
 
@@ -19,11 +21,12 @@ from typing import Callable
 import numpy as np
 
 from . import db
-from .config import DEFAULT_SIGMA, DEFAULT_TAU, DEFAULT_XI, MAX_GOALS, REFERENCE_LEAGUE
+from .config import AUX_BASE_PRIOR, AUX_DEFAULT_PARAMS, DEFAULT_SIGMA, DEFAULT_TAU, DEFAULT_XI, MAX_GOALS, REFERENCE_LEAGUE
+from .model import aux_markets as ax
 from .model import markets as mk
 from .model.count_model import fit_count_model
-from .model.goals import build_count_data, fit_goal_model, load_matches, score_matrix
-from .model.pipeline import _fit_aux, _stat_values
+from .model.goals import MatchRecord, build_count_data, fit_goal_model, load_matches, score_matrix
+from .model.pipeline import RED_HOME_PRIOR, _fit_aux, _stat_values, card_ht_shares, fit_aux_family
 
 log = logging.getLogger(__name__)
 EPS = 1e-12
@@ -41,11 +44,13 @@ def _dt(s: str) -> datetime:
 class Pred:
     match_id: str
     league: str
-    fam: str            # ms | au | kg | iy | iyms | korner
+    fam: str            # ms | au | kg | iy | iyms | korner | kart
     probs: list[float]
     outcome: int
     base: list[float]   # lig taban oranı tahmini
     simple: list[float] | None
+    sub: str = ""       # korner/kart: alt pazar ve çizgi (ör. "korner_au 9.5")
+    mkey: str = ""      # korner/kart: MARKETS pazar anahtarı (pazar başına doğrulama)
 
 
 def _league_base_rates(train: list, as_of: datetime) -> dict[str, dict[str, list[float]]]:
@@ -106,11 +111,10 @@ class RawPred:
 
 
 def walk_forward(con: sqlite3.Connection, start: datetime, end: datetime, xi: float, sigma: float, tau: float,
-                 with_baselines: bool = True, with_corners: bool = False, alpha: float = 1.0, cal_t: float = 1.0,
+                 with_baselines: bool = True, alpha: float = 1.0, cal_t: float = 1.0,
                  cal_g: float = 1.0, raw: list[RawPred] | None = None, xg_weight: float = 0.0) -> list[Pred]:
     preds: list[Pred] = []
     all_matches = load_matches(con, _iso(end))
-    corner_vals = _stat_values(con, _iso(end), "corners") if with_corners else {}
     wk = start
     while wk < end:
         nxt = min(wk + timedelta(days=7), end)
@@ -124,10 +128,6 @@ def walk_forward(con: sqlite3.Connection, start: datetime, end: datetime, xi: fl
         if with_baselines:
             sdata = build_count_data(train, wk, 0.0015)
             simple = fit_count_model(sdata, REFERENCE_LEAGUE, sigma=3.0, tau=3.0, home_prior=(0.2, 1.0), delta_prior_sd=1.0)
-        corners = _fit_aux(train, corner_vals, wk, xi) if with_corners else None
-        train_ids = {m.id for m in train if m.date >= wk - timedelta(days=400)}
-        c_tr = [sum(v) > 9.5 for k, v in corner_vals.items() if k in train_ids]
-        c_base = float(np.mean(c_tr)) if c_tr else 0.5
         for m in test:
             r = gm.rates(m.league, m.home, m.away, m.neutral)
             if r is None or m.league not in base:
@@ -145,14 +145,310 @@ def walk_forward(con: sqlite3.Connection, start: datetime, end: datetime, xi: fl
             for fam, y in _outcomes(m).items():
                 preds.append(Pred(m.id, m.league, fam, [float(x) for x in probs[fam]], y, base[m.league][fam],
                                   sp if fam == "ms" else None))
-            if corners is not None and m.id in corner_vals:
-                cm = corners.means(m.league, m.home, m.away, m.neutral)
-                if cm:
-                    alt, ust = mk.corner_over_prob(cm[0], cm[1], corners.k, 9.5)
-                    tot = sum(corner_vals[m.id])
-                    preds.append(Pred(m.id, m.league, "korner", [alt, ust], 0 if tot < 9.5 else 1, [1 - c_base, c_base], None))
         wk = nxt
     return preds
+
+
+# ---------------------------------------------------------------- korner / kart
+
+AUX_GRID = tuple((xi, s_) for xi in (0.005, 0.01) for s_ in (0.05, 0.1, 0.15))
+RED_SIGMA_GRID = (0.05, 0.1, 0.2)
+# aile -> (alt pazarlar, ortak dağılım üst sınırı, k_toplam/beta seçiminde kullanılan toplam çizgileri)
+AUX_FAMILIES = {"korner": (ax.CORNER_SUBMARKETS, ax.CORNER_NMAX, ax.CORNER_TUNE_LINES),
+                "kart": (ax.CARD_SUBMARKETS, ax.CARD_NMAX, ax.CARD_TUNE_LINES)}
+# Pazar ailesi / pazar türü doğrulama ölçütü (tüm aileler): değerlendirme diliminde
+VALID_MIN_N = 300
+VALID_MIN_GAIN = 0.002     # lig taban oranına göre log-loss kazancı
+VALID_MAX_ECE = 0.03
+
+
+@dataclass
+class AuxObs:
+    """Bir maçın gerçekleşen korner/kart değerleri (90 dk)."""
+    match: MatchRecord
+    corners: tuple[int, int] | None
+    cards: tuple[int, int] | None
+    cards_ht: tuple[int, int] | None
+    reds: int | None
+
+
+def aux_observations(con: sqlite3.Connection, before: str) -> dict[str, AuxObs]:
+    matches = {m.id: m for m in load_matches(con, before)}
+    rows = con.execute(
+        """SELECT s.match_id, s.is_home, s.corners, s.card_points, s.card_points_ht, s.red_cards_90
+           FROM team_match_stats s JOIN matches m ON m.id=s.match_id
+           WHERE m.completed=1 AND m.extra_time=0 AND m.date_utc < ?""",
+        (before,),
+    ).fetchall()
+    tmp: dict[str, dict[int, sqlite3.Row]] = defaultdict(dict)
+    for r in rows:
+        tmp[r["match_id"]][int(r["is_home"])] = r
+    out: dict[str, AuxObs] = {}
+    for mid, d in tmp.items():
+        if mid not in matches or 0 not in d or 1 not in d:
+            continue
+        h, a = d[1], d[0]
+
+        def pair(col: str) -> tuple[int, int] | None:
+            return None if h[col] is None or a[col] is None else (int(h[col]), int(a[col]))
+
+        rd = pair("red_cards_90")
+        out[mid] = AuxObs(matches[mid], pair("corners"), pair("card_points"), pair("card_points_ht"),
+                          None if rd is None else rd[0] + rd[1])
+    return out
+
+
+def _sub_outcome(sm: ax.SubMarket, fam: str, o: AuxObs) -> int | None:
+    v = o.corners if fam == "korner" else o.cards
+    if v is None:
+        return None
+    ht = o.cards_ht if fam == "kart" else None
+    return sm.outcome(v[0], v[1], ht[0] if ht else None, ht[1] if ht else None, o.reds)
+
+
+class _AuxBase:
+    """Alt pazar başına lig taban oranı: haftadan önceki 400 gün, genel orana AUX_BASE_PRIOR maç ağırlığıyla büzülmüş."""
+
+    def __init__(self, obs: dict[str, AuxObs], fam: str, subs: tuple[ax.SubMarket, ...]) -> None:
+        self.rows = sorted(obs.values(), key=lambda o: o.match.date)
+        self.fam, self.subs = fam, subs
+        self.weeks: dict[datetime, dict[str, dict[str, list[float]]]] = {}
+
+    def _rates(self, wk: datetime) -> dict[str, dict[str, list[float]]]:
+        lo, hi = wk - timedelta(days=400), wk - timedelta(hours=3)
+        acc: dict[str, dict[str, np.ndarray]] = defaultdict(lambda: {s.name: np.zeros(s.k) for s in self.subs})
+        for o in self.rows:
+            if o.match.date < lo:
+                continue
+            if o.match.date >= hi:
+                break
+            for s_ in self.subs:
+                y = _sub_outcome(s_, self.fam, o)
+                if y is not None:
+                    acc[o.match.league][s_.name][y] += 1
+                    acc["__global__"][s_.name][y] += 1
+        glob = {s_.name: (acc["__global__"][s_.name] + 1) / (acc["__global__"][s_.name].sum() + s_.k) for s_ in self.subs}
+        return {lg: {name: list((v + AUX_BASE_PRIOR * glob[name]) / (v.sum() + AUX_BASE_PRIOR)) for name, v in d.items()}
+                for lg, d in acc.items()}
+
+    def get(self, league: str, wk: datetime) -> dict[str, list[float]]:
+        if wk not in self.weeks:
+            self.weeks[wk] = self._rates(wk)
+        return self.weeks[wk].get(league) or self.weeks[wk]["__global__"]
+
+
+AuxRow = tuple[str, datetime, float, float, float | None]   # maç, hafta, mu_ev, mu_dep, lig toplamı (büzülme hedefi)
+
+
+def aux_weekly_means(obs: dict[str, AuxObs], train_matches: list[MatchRecord], fam: str, start: datetime, end: datetime,
+                     p: dict[str, float]) -> list[AuxRow]:
+    """Haftalık walk-forward: hafta başına yalnız o ana kadarki veriyle sayım modeli, sonraki 7 günün ortalamaları."""
+    def val(o: AuxObs) -> tuple[int, int] | None:
+        return o.corners if fam == "korner" else o.cards
+
+    values = {mid: (float(v[0]), float(v[1])) for mid, o in obs.items() if (v := val(o)) is not None}
+    out = []
+    wk = start
+    while wk < end:
+        nxt = min(wk + timedelta(days=7), end)
+        test = [o.match for o in obs.values() if wk <= o.match.date < nxt and val(o) is not None]
+        if test:
+            train = [m for m in train_matches if m.date < wk - timedelta(hours=3)]
+            aux = fit_aux_family(train, values, wk, p)
+            if aux is not None:
+                for m in test:
+                    mm = aux.means(m.league, m.home, m.away, m.neutral)
+                    if mm:
+                        out.append((m.id, wk, mm[0], mm[1], aux.league_total(m.league, m.home, m.away, m.neutral)))
+        wk = nxt
+    return out
+
+
+def red_weekly_means(train_matches: list[MatchRecord], ids: set[str], start: datetime, end: datetime,
+                     p: dict[str, float], values: dict[str, tuple[float, float]]) -> dict[str, tuple[float, float]]:
+    """Kırmızı kart: haftalık walk-forward takım başına beklenen kırmızı kart (Poisson, seyrek olay)."""
+    out: dict[str, tuple[float, float]] = {}
+    wk = start
+    while wk < end:
+        nxt = min(wk + timedelta(days=7), end)
+        test = [m for m in train_matches if wk <= m.date < nxt and m.id in ids]
+        if test:
+            train = [m for m in train_matches if m.date < wk - timedelta(hours=3)]
+            aux = fit_aux_family(train, values, wk, p, RED_HOME_PRIOR)
+            if aux is not None:
+                for m in test:
+                    mm = aux.means(m.league, m.home, m.away, m.neutral)
+                    if mm:
+                        out[m.id] = mm
+        wk = nxt
+    return out
+
+
+def _joint(fam: str, mh: float, ma: float, lt: float | None, dist: ax.CountDist, ht_share: float | None = None,
+           p_red: float | None = None) -> ax.CountJoint:
+    sh, sa = ax.shrink_means(mh, ma, lt, dist.beta)
+    return ax.count_joint(sh, sa, dist, AUX_FAMILIES[fam][1], ht_share=ht_share, p_red=p_red)
+
+
+def _subs_logloss(rows: list[AuxRow], obs: dict[str, AuxObs], fam: str, dist: ax.CountDist,
+                  subs: tuple[ax.SubMarket, ...]) -> float:
+    """Alt pazarların (eşit ağırlıklı) ortalama log-loss'u: yapılandırma seçim ölçütü."""
+    tot: dict[str, list[float]] = defaultdict(list)
+    for mid, _wk, mh, ma, lt in rows:
+        j = _joint(fam, mh, ma, lt, dist)
+        for s_ in subs:
+            y = _sub_outcome(s_, fam, obs[mid])
+            pr = s_.probs(j)
+            if y is not None and pr is not None:
+                tot[s_.name].append(-float(np.log(max(pr[y], EPS))))
+    return float(np.mean([np.mean(v) for v in tot.values()])) if tot else float("inf")
+
+
+def _fit_dist(rows: list[AuxRow], obs: dict[str, AuxObs], fam: str) -> ax.CountDist:
+    """Toplam (beta, k_toplam: toplam çizgilerinin log-loss'u) ve pay (phi: beta-binom olabilirliği) parametreleri."""
+    lines = AUX_FAMILIES[fam][2]
+    vals = [(mh, ma, lt if lt else mh + ma, obs[mid].corners if fam == "korner" else obs[mid].cards)
+            for mid, _w, mh, ma, lt in rows]
+    vals = [(mh, ma, lt, v) for mh, ma, lt, v in vals if v is not None]
+    mu_t = np.array([mh + ma for mh, ma, _, _ in vals])
+    lg_t = np.array([lt for _, _, lt, _ in vals])
+    tots = np.array([v[0] + v[1] for _, _, _, v in vals])
+    beta, k_total, _ = ax.fit_total(mu_t, lg_t, tots, lines)
+    phi = ax.fit_phi(np.array([mh / (mh + ma) for mh, ma, _, _ in vals]), np.array([v[0] for _, _, _, v in vals]), tots)
+    return ax.CountDist(k_total, phi, beta)
+
+
+def tune_aux(con: sqlite3.Connection, tune_start: datetime, val_start: datetime, eval_start: datetime,
+             progress: Callable[[str], None]) -> dict:
+    """Korner / kart / kırmızı kart model ayarı. (xi, sigma) AYARLAMA diliminde alt pazarların ortalama log-loss'uyla
+    seçilir (dağılım parametreleri aynı dilimde uydurularak); dağılım parametreleri (k_toplam, phi) seçilen yapılandırmayla
+    AYARLAMA + DOĞRULAMA dilimlerinin tahminlerinden. Değerlendirme dilimi bu kararlara karışmaz. Meta "aux_params"a yazar."""
+    obs = aux_observations(con, _iso(eval_start))
+    train_matches = load_matches(con, _iso(eval_start))
+    params: dict[str, dict[str, float]] = {k: dict(v) for k, v in AUX_DEFAULT_PARAMS.items()}
+    report: dict = {"decided_on": "ayarlama (xi, sigma) + ayarlama/doğrulama (dağılım)"}
+    for fam, (subs, _nmax, _lines) in AUX_FAMILIES.items():
+        grid = []
+        tune_subs = tuple(s_ for s_ in subs if s_.key not in ("kirmizi", "iy_kart_au"))
+        for xi, sg in AUX_GRID:
+            p = {"xi": xi, "sigma": sg}
+            rows = aux_weekly_means(obs, train_matches, fam, tune_start, val_start, p)
+            if len(rows) < VALID_MIN_N:
+                continue
+            dist = _fit_dist(rows, obs, fam)
+            ll = _subs_logloss(rows, obs, fam, dist, tune_subs)
+            grid.append({"xi": xi, "sigma": sg, "k_total": dist.k_total, "phi": dist.phi, "beta": dist.beta,
+                         "mean_logloss": ll, "n": len(rows)})
+            progress(f"{fam} ayarı xi={xi} sigma={sg}: alt pazar ort. log-loss {ll:.4f} (n={len(rows)})")
+        if not grid:
+            report[fam] = {"note": "ayarlama diliminde yetersiz veri; varsayılanlar", "grid": []}
+            continue
+        best = min(grid, key=lambda g: g["mean_logloss"])
+        p = {"xi": best["xi"], "sigma": best["sigma"]}
+        rows = aux_weekly_means(obs, train_matches, fam, tune_start, eval_start, p)
+        dist = _fit_dist(rows, obs, fam)
+        params[fam] = {**p, "k_total": dist.k_total, "phi": dist.phi, "beta": dist.beta}
+        report[fam] = {"grid": grid, "chosen": params[fam], "n_dist": len(rows)}
+        progress(f"{fam} seçimi: {params[fam]} (dağılım n={len(rows)})")
+    # Kırmızı kart: seyrek olay; sigma ayarlama diliminde "en az bir kırmızı" log-loss'uyla
+    red_vals = _stat_values(con, _iso(eval_start), "red_cards_90")
+    ids = {mid for mid, o in obs.items() if o.reds is not None}
+    rgrid = []
+    for sg in RED_SIGMA_GRID:
+        p = {"xi": params["kart"]["xi"], "sigma": sg}
+        mm = red_weekly_means(train_matches, ids, tune_start, val_start, p, red_vals)
+        if len(mm) < VALID_MIN_N:
+            continue
+        ll = float(np.mean([-np.log(max(ax.red_prob(*mm[mid]) if obs[mid].reds else 1 - ax.red_prob(*mm[mid]), EPS))
+                            for mid in mm]))
+        rgrid.append({"xi": p["xi"], "sigma": sg, "logloss": ll, "n": len(mm)})
+        progress(f"kırmızı kart ayarı sigma={sg}: log-loss {ll:.4f} (n={len(mm)})")
+    if rgrid:
+        rb = min(rgrid, key=lambda g: g["logloss"])
+        params["kirmizi"] = {"xi": rb["xi"], "sigma": rb["sigma"]}
+    report["kirmizi"] = {"grid": rgrid, "chosen": params["kirmizi"]}
+    with db.tx(con):
+        db.meta_set(con, "aux_params", params)
+    report["params"] = params
+    return report
+
+
+def aux_walk_forward(con: sqlite3.Connection, start: datetime, end: datetime, params: dict[str, dict[str, float]]
+                     ) -> list[Pred]:
+    """Değerlendirme: korner ve kart alt pazarları, haftalık walk-forward, lig taban oranına karşı."""
+    obs = aux_observations(con, _iso(end))
+    train_matches = load_matches(con, _iso(end))
+    red_vals = _stat_values(con, _iso(end), "red_cards_90")
+    preds: list[Pred] = []
+    for fam, (subs, _nmax, _lines) in AUX_FAMILIES.items():
+        p = params[fam]
+        dist = ax.CountDist(p["k_total"], p["phi"], p.get("beta", 1.0))
+        rows = aux_weekly_means(obs, train_matches, fam, start, end, p)
+        reds: dict[str, tuple[float, float]] = {}
+        shares: dict[datetime, dict[str, float]] = {}
+        if fam == "kart":
+            reds = red_weekly_means(train_matches, {r[0] for r in rows}, start, end, params["kirmizi"], red_vals)
+        base = _AuxBase(obs, fam, subs)
+        for mid, wk, mh, ma, lt in rows:
+            o = obs[mid]
+            share = None
+            p_red = None
+            if fam == "kart":
+                if wk not in shares:
+                    shares[wk] = card_ht_shares(con, _iso(wk - timedelta(hours=3)))
+                share = shares[wk].get(o.match.league, shares[wk].get("__global__"))
+                p_red = ax.red_prob(*reds[mid]) if mid in reds else None
+            j = _joint(fam, mh, ma, lt, dist, share, p_red)
+            b = base.get(o.match.league, wk)
+            for s_ in subs:
+                y = _sub_outcome(s_, fam, o)
+                pr = s_.probs(j)
+                if y is None or pr is None:
+                    continue
+                preds.append(Pred(mid, o.match.league, fam, [float(v) for v in pr], y, b[s_.name], None, s_.name, s_.key))
+    return preds
+
+
+def _criterion(ps: list[Pred]) -> dict:
+    ys = [p.outcome for p in ps]
+    model = [p.probs for p in ps]
+    cal = calibration(model, ys)
+    tot = sum(c["n"] for c in cal)
+    ece = sum(c["n"] * abs(c["pred"] - c["obs"]) for c in cal) / tot if tot else 1.0
+    mll, bll = logloss(model, ys), logloss([p.base for p in ps], ys)
+    return {"n": len(ps), "model_logloss": mll, "base_logloss": bll, "gain": bll - mll, "ece": ece,
+            "validated": len(ps) >= VALID_MIN_N and bll - mll > VALID_MIN_GAIN and ece < VALID_MAX_ECE}
+
+
+def _aux_flags(v: dict) -> dict:
+    """Aile doğrulamasına eklenen pazar türü ve çizgi bayrakları. Çizgi bayrağı: pazar türü doğrulandı VE o çizgide
+    log-loss taban orandan kötü değil (kazanç > 0). Tahminde değerlendirilmemiş çizgiler pazar türü bayrağını alır."""
+    keep = ("validated", "n", "gain", "ece")
+    markets = {k: {x: r[x] for x in keep} for k, r in (v.get("markets") or {}).items()}
+    lines = {}
+    for name, r in (v.get("lines") or {}).items():
+        key = name.split(" ", 1)[0]
+        lines[name] = {**{x: r[x] for x in keep}, "validated": bool(markets.get(key, {}).get("validated")) and r["gain"] > 0}
+    return {"markets": markets, "lines": lines}
+
+
+def aux_validation(preds: list[Pred]) -> dict[str, dict]:
+    """Aile (tüm alt pazarlar birlikte), pazar türü ve çizgi bazında sonuçlar. Pazar türü bayrağı kupon/etiket için."""
+    out: dict[str, dict] = {}
+    for fam in AUX_FAMILIES:
+        ps = [p for p in preds if p.fam == fam]
+        if not ps:
+            continue
+        res = _criterion(ps)
+        by_key: dict[str, list[Pred]] = defaultdict(list)
+        by_sub: dict[str, list[Pred]] = defaultdict(list)
+        for p in ps:
+            by_key[p.mkey].append(p)
+            by_sub[p.sub].append(p)
+        res["markets"] = {k: _criterion(v) for k, v in by_key.items()}
+        res["lines"] = {k: _criterion(v) for k, v in by_sub.items()}
+        out[fam] = res
+    return out
 
 
 def _score_loglik(raw: list[RawPred], t: float, g: float) -> float:
@@ -330,8 +626,16 @@ def tune_and_evaluate(con: sqlite3.Connection, progress: Callable[[str], None]) 
                  "tune_score_ll_raw": base_ll, "tune_score_ll_cal": cal_ll, "decided_on": "doğrulama dilimi"}
     progress(f"Doğrulama MS+A/Ü+KG log-loss: kalibrasyonsuz {ll_raw:.4f}, kalibre {ll_cal:.4f} -> {'kullanılıyor' if use_cal else 'kullanılmıyor'}")
     # 5) Değerlendirme (dokunulmamış dilim): yalnızca seçilen yapılandırmayla, rapor + aile doğrulaması
-    ev = walk_forward(con, eval_start, now, xi, sigma, DEFAULT_TAU, with_baselines=True, with_corners=True, alpha=alpha,
+    ev = walk_forward(con, eval_start, now, xi, sigma, DEFAULT_TAU, with_baselines=True, alpha=alpha,
                       cal_t=cal_t if use_cal else 1.0, cal_g=cal_g if use_cal else 1.0, xg_weight=xg_w)
+    # 5b) Korner / kart: ayar (ayarlama + doğrulama dilimleri) ve değerlendirme dilimi
+    aux_tuning = tune_aux(con, tune_start, val_start, eval_start, progress)
+    aux_preds = aux_walk_forward(con, eval_start, now, aux_tuning["params"])
+    aux_val = aux_validation(aux_preds)
+    for fam, r in aux_val.items():
+        progress(f"{fam} doğrulaması (değerlendirme): log-loss {r['model_logloss']:.4f} / taban {r['base_logloss']:.4f}, "
+                 f"ECE {r['ece']:.3f}, n={r['n']} -> {'doğrulandı' if r['validated'] else 'doğrulanmadı'}; pazarlar: "
+                 + ", ".join(f"{k} {'✓' if v['validated'] else '✗'} ({v['gain']:+.4f})" for k, v in r["markets"].items()))
     params = {"xi": xi, "sigma": sigma, "tau": DEFAULT_TAU, "alpha": alpha,
               "cal_t": cal_t if use_cal else 1.0, "cal_g": cal_g if use_cal else 1.0}
     if xg_w > 0:  # yalnızca doğrulamadan geçtiyse (aksi halde parametre seti ve model sürümü bugünküyle aynı kalır)
@@ -341,6 +645,7 @@ def tune_and_evaluate(con: sqlite3.Connection, progress: Callable[[str], None]) 
     progress(f"Seçilen parametreler: {params}")
 
     summary = summarize(ev)
+    summary.update(summarize(aux_preds))
     by_league: dict[str, dict] = {}
     lg_groups: dict[str, list[Pred]] = defaultdict(list)
     for p in ev:
@@ -360,16 +665,19 @@ def tune_and_evaluate(con: sqlite3.Connection, progress: Callable[[str], None]) 
         cal = r["calibration"]
         tot = sum(c["n"] for c in cal)
         ece = sum(c["n"] * abs(c["pred"] - c["obs"]) for c in cal) / tot if tot else 1.0
-        ok = r["n"] >= 300 and r["model_logloss"] < r["base_logloss"] - 0.002 and ece < 0.03
+        ok = r["n"] >= VALID_MIN_N and r["model_logloss"] < r["base_logloss"] - VALID_MIN_GAIN and ece < VALID_MAX_ECE
         validation[fam] = {"validated": ok, "ece": ece, "n": r["n"],
                            "gain": r["base_logloss"] - r["model_logloss"]}
         r["ece"] = ece
+        if fam in aux_val:
+            r["markets"] = aux_val[fam]["markets"]
+            r["lines"] = aux_val[fam]["lines"]
     family = {
         "ms": validation.get("ms", {}),
         "au": validation.get("au", {}),
         "kg": validation.get("kg", {}),
         "iy": {**validation.get("iy", {}), "validated": bool(validation.get("iy", {}).get("validated")) and bool(validation.get("iyms", {}).get("validated"))},
-        "korner": validation.get("korner", {}),
+        **{fam: {**validation.get(fam, {}), **_aux_flags(aux_val.get(fam, {}))} for fam in AUX_FAMILIES},
     }
     result = {
         "created_at": _iso(datetime.now(timezone.utc)),
@@ -385,6 +693,7 @@ def tune_and_evaluate(con: sqlite3.Connection, progress: Callable[[str], None]) 
         "by_league": by_league,
         "family_validation": family,
         "dispersion": disp,
+        "aux_tuning": aux_tuning,
     }
     with db.tx(con):
         db.meta_set(con, "backtest", result)
@@ -446,12 +755,13 @@ def tune_xg_weight(con: sqlite3.Connection, tune_start: datetime, val_start: dat
 
 
 def out_of_sample_dispersion(con: sqlite3.Connection, start: datetime, end: datetime, xi: float) -> dict[str, float]:
-    """Şut ve korner için NB k: haftalık walk-forward tahminlerinin artıklarından (örneklem içi aşırı uyum yok)."""
+    """Şut için NB k (oyuncu simülasyonu): haftalık walk-forward tahminlerinin artıklarından (örneklem içi aşırı uyum
+    yok). Korner ve kartın dağılım parametreleri tune_aux'ta seçilir."""
     from .model.count_model import nb_dispersion
 
     all_matches = load_matches(con, _iso(end))
     out: dict[str, float] = {}
-    for stat in ("shots", "corners"):
+    for stat in ("shots",):
         vals = _stat_values(con, _iso(end), stat)
         ys: list[float] = []
         mus: list[float] = []

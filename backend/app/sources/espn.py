@@ -127,6 +127,15 @@ class TeamStatsRow:
 
 
 @dataclass
+class CardCount:
+    """iddaa kart sayımı (Toplam Kart Sayısı kuralı): sarı 1, doğrudan kırmızı ya da ikinci sarıdan kırmızı 2.
+    İkinci sarıyla atılan oyuncu: ilk sarı 1 + kırmızı 2 = 3. Yalnız 90 dakika (1. ve 2. devre)."""
+    points: int
+    points_ht: int
+    reds: int
+
+
+@dataclass
 class GoalRow:
     seq: int
     team_id: str
@@ -152,6 +161,7 @@ class SummaryParse:
     extra_time: bool = False
     lineup_confirmed: bool = False
     has_player_stats: bool = False
+    cards: dict[str, CardCount] = field(default_factory=dict)   # takım id -> iddaa kart sayımı (yoksa boş)
 
 
 def _team_row(t: dict[str, Any]) -> TeamRow:
@@ -214,6 +224,47 @@ def parse_scoreboard(league: str, payload: dict[str, Any]) -> list[MatchRow]:
     return out
 
 
+_CARD_TYPES = ("yellow-card", "red-card")
+
+
+def card_counts(payload: dict[str, Any], team_ids: list[str]) -> dict[str, CardCount]:
+    """keyEvents kart olaylarından takım başına iddaa kart puanı.
+
+    ESPN boxscore'daki yellowCards, ikinci sarıyla atılan oyuncunun İLK sarısını içermiyor (21.786 takım-maç
+    satırının %99,6'sında yellow = sarı olay - ikinci sarı kırmızısı; redCards olay sayısıyla %99,9 aynı). Bu yüzden
+    sayım boxscore'dan değil olaylardan yapılır. Oyuncu başına sarı en fazla 1 (aynı oyuncuya iki sarı olayı ve kırmızı
+    yoksa mükerrer kayıttır), kırmızı en fazla 1. Uzatma devreleri (3+) sayılmaz. Olay listesi hiç yoksa boş döner
+    (kart yok sayılmaz); takım listesinde olup kart olayı olmayan takım 0 alır.
+    """
+    events = payload.get("keyEvents")
+    if not events:
+        return {}
+    per: dict[tuple[str, str], list[int]] = {}   # (takım, oyuncu) -> [sarı, kırmızı, ilk yarı sarı, ilk yarı kırmızı]
+    for i, k in enumerate(events):
+        if (k.get("type") or {}).get("type") not in _CARD_TYPES:
+            continue
+        period = _int((k.get("period") or {}).get("number"))
+        if period not in (1, 2):
+            continue
+        tid = str((k.get("team") or {}).get("id") or "")
+        parts = k.get("participants") or []
+        aid = str(((parts[0] if parts else {}).get("athlete") or {}).get("id") or f"olay{i}")
+        e = per.setdefault((tid, aid), [0, 0, 0, 0])
+        red = k["type"]["type"] == "red-card"
+        e[1 if red else 0] += 1
+        if period == 1:
+            e[3 if red else 2] += 1
+    out = {t: CardCount(0, 0, 0) for t in team_ids}
+    for (tid, _), (y, r, yh, rh) in per.items():
+        if tid not in out:
+            continue
+        c = out[tid]
+        c.points += min(y, 1) + 2 * min(r, 1)
+        c.points_ht += min(yh, 1) + 2 * min(rh, 1)
+        c.reds += min(r, 1)
+    return out
+
+
 _TEAM_STAT_MAP = {
     "totalShots": "shots",
     "shotsOnTarget": "shots_on_target",
@@ -262,6 +313,8 @@ def parse_summary(match_id: str, payload: dict[str, Any]) -> SummaryParse:
     stats_valid = any((t.possession or 0) > 0 or (t.shots or 0) > 0 or (t.fouls or 0) > 0 for t in res.team_stats)
     if not stats_valid:
         res.team_stats = []
+    if res.state == "post":
+        res.cards = card_counts(payload, [t.team_id for t in res.team_stats])
 
     finished = res.state == "post"
     for r in payload.get("rosters") or []:

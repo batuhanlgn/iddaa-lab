@@ -1,4 +1,4 @@
-import { dateTime, odd, pct } from "@/lib/format";
+import { dateTime, odd } from "@/lib/format";
 import type { FormMatch, MatchDetail } from "@/lib/types";
 import { SectionTitle } from "../ui";
 
@@ -52,23 +52,6 @@ export default function SideInfo({ d }: { d: MatchDetail }) {
         </div>
         <p className="mt-2 text-[0.7rem] text-muted">G: galibiyet · B: beraberlik · M: mağlubiyet</p>
       </div>
-
-      {d.corners && (
-        <div>
-          <SectionTitle right={<span className="kicker">deneysel</span>}>Korner</SectionTitle>
-          <p className="mb-2 text-sm text-ink-2">
-            Beklenen korner: <b className="num text-ink">{d.corners.mu_home.toFixed(1)}</b> – <b className="num text-ink">{d.corners.mu_away.toFixed(1)}</b>{" "}
-            (toplam <span className="num">{(d.corners.mu_home + d.corners.mu_away).toFixed(1)}</span>)
-          </p>
-          <div className="flex flex-wrap gap-1.5 text-xs">
-            {Object.entries(d.corners.lines).map(([line, v]) => (
-              <span key={line} className="num rounded border border-line px-2 py-1">
-                {line}: Alt <b>{pct(v.Alt)}</b> · Üst <b>{pct(v["Üst"])}</b>
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
 
       {hist.length > 0 && (
         <div>

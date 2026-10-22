@@ -1,4 +1,4 @@
-"""Model fit + maç tahmini (pazarlar, iddaa karşılaştırması, korner, simülasyon)."""
+"""Model fit + maç tahmini (pazarlar, iddaa karşılaştırması, korner, kart, simülasyon)."""
 from __future__ import annotations
 
 import hashlib
@@ -13,10 +13,11 @@ import numpy as np
 
 from .. import db
 from ..config import (
-    BLEND_WEIGHT_DEFAULT, DATA_DIR, DEFAULT_SIGMA, DEFAULT_TAU, DEFAULT_XI, LEAGUE_BY_SLUG, N_SCENARIOS, N_SIMS,
-    REFERENCE_LEAGUE,
+    AUX_DEFAULT_PARAMS, AUX_HT_SHARE_PRIOR, AUX_TAU, BLEND_WEIGHT_DEFAULT, DATA_DIR, DEFAULT_SIGMA, DEFAULT_TAU,
+    DEFAULT_XI, LEAGUE_BY_SLUG, N_SCENARIOS, N_SIMS, REFERENCE_LEAGUE,
 )
-from ..sources.iddaa import MARKETS
+from ..sources.iddaa import MARKETS, ONE_SIDED_KEYS, MarketDef
+from . import aux_markets as ax
 from . import markets as mk
 from .count_model import CountModel, fit_count_model, nb_dispersion
 from .goals import GoalModel, MatchRecord, build_count_data, fit_goal_model, score_matrix
@@ -60,6 +61,31 @@ class AuxCountModel:
             return None
         return float(np.exp(lr[0])), float(np.exp(lr[1]))
 
+    def league_total(self, comp: str, home: str, away: str, neutral: bool) -> float | None:
+        """İki takımın liglerinin ORTALAMA takımları için beklenen toplam (takım sapmaları sıfır): büzülme hedefi."""
+        m = self.model
+        hi, ai = m.team_index.get(home), m.team_index.get(away)
+        if hi is None or ai is None:
+            return None
+        ci = m.comp_index.get(comp)
+        h = 0.0 if neutral else (float(m.home[ci]) if ci is not None else float(np.median(m.home)))
+        dl = float(m.delta[ci]) if ci is not None else 0.0
+        lh, la = m.team_league[hi], m.team_league[ai]
+        a_h, d_h = m.A.get(lh, 0.0), m.D.get(lh, 0.0)
+        a_a, d_a = m.A.get(la, 0.0), m.D.get(la, 0.0)
+        return float(np.exp(m.mu + h + dl + a_h - d_a) + np.exp(m.mu + dl + a_a - d_h))
+
+
+def load_aux_params(con: sqlite3.Connection | None = None) -> dict[str, dict[str, float]]:
+    """Korner / kart / kırmızı kart modeli ayarları: backtest.tune_aux sonucu (meta "aux_params"), yoksa varsayılanlar."""
+    out = {k: dict(v) for k, v in AUX_DEFAULT_PARAMS.items()}
+    stored = db.meta_get(con, "aux_params") if con is not None else None
+    if isinstance(stored, dict):
+        for fam, vals in stored.items():
+            if fam in out and isinstance(vals, dict):
+                out[fam].update({k: float(v) for k, v in vals.items() if k in out[fam] and isinstance(v, (int, float))})
+    return out
+
 
 @dataclass
 class FittedModels:
@@ -70,6 +96,10 @@ class FittedModels:
     players: PlayerStore
     omega: float
     params: dict[str, float]
+    cards: AuxCountModel | None = None
+    reds: AuxCountModel | None = None
+    aux_params: dict[str, dict[str, float]] | None = None
+    card_ht_share: dict[str, float] | None = None    # lig -> kart puanının ilk yarı payı (yoksa "__global__")
 
     @property
     def version(self) -> str:
@@ -89,17 +119,47 @@ def _stat_values(con: sqlite3.Connection, before: str, column: str) -> dict[str,
     return {mid: (d[1], d[0]) for mid, d in tmp.items() if 1 in d and 0 in d}
 
 
-def _fit_aux(matches: list[MatchRecord], values: dict[str, tuple[float, float]], as_of: datetime, xi: float) -> AuxCountModel | None:
+def _fit_aux(matches: list[MatchRecord], values: dict[str, tuple[float, float]], as_of: datetime, xi: float,
+             sigma: float = 0.25, tau: float = 0.3, home_prior: tuple[float, float] = (0.1, 0.15)) -> AuxCountModel | None:
     data = build_count_data(matches, as_of, xi, values=values)
     if len(data.weight) < 200:
         return None
-    m = fit_count_model(data, REFERENCE_LEAGUE, sigma=0.25, tau=0.3, home_prior=(0.1, 0.15), delta_prior_sd=0.2)
+    m = fit_count_model(data, REFERENCE_LEAGUE, sigma=sigma, tau=tau, home_prior=home_prior, delta_prior_sd=0.2)
     eh = m.mu + m.home[data.comp_idx] * (1 - data.neutral) + m.delta[data.comp_idx] + m.att[data.home_idx] - m.defn[data.away_idx]
     ea = m.mu + m.delta[data.comp_idx] + m.att[data.away_idx] - m.defn[data.home_idx]
     y = np.concatenate([data.y_home, data.y_away])
     mu = np.exp(np.concatenate([eh, ea]))
     w = np.concatenate([data.weight, data.weight])
     return AuxCountModel(m, nb_dispersion(y, mu, w), len(data.weight))
+
+
+# Kırmızı kart: seyrek olay -> ev sahibi etkisi priorı sıfır merkezli (ev sahibi daha az kırmızı görebilir de)
+RED_HOME_PRIOR = (0.0, 0.2)
+
+
+def card_ht_shares(con: sqlite3.Connection, before: str, since_days: int = 400) -> dict[str, float]:
+    """Lig başına kart puanının ilk yarı payı; az veride genel paya büzülür (AUX_HT_SHARE_PRIOR puan ağırlığı)."""
+    since = (datetime.fromisoformat(before.replace("Z", "+00:00")) - timedelta(days=since_days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    rows = con.execute(
+        """SELECT m.league, SUM(s.card_points_ht) ht, SUM(s.card_points) ft FROM team_match_stats s
+           JOIN matches m ON m.id=s.match_id
+           WHERE m.completed=1 AND m.extra_time=0 AND m.date_utc < ? AND m.date_utc >= ?
+             AND s.card_points IS NOT NULL AND s.card_points_ht IS NOT NULL GROUP BY m.league""",
+        (before, since),
+    ).fetchall()
+    tot_ht = sum(float(r["ht"] or 0) for r in rows)
+    tot_ft = sum(float(r["ft"] or 0) for r in rows)
+    if tot_ft <= 0:
+        return {}
+    g = tot_ht / tot_ft
+    out = {r["league"]: (float(r["ht"] or 0) + AUX_HT_SHARE_PRIOR * g) / (float(r["ft"] or 0) + AUX_HT_SHARE_PRIOR) for r in rows}
+    out["__global__"] = g
+    return out
+
+
+def fit_aux_family(matches: list[MatchRecord], values: dict[str, tuple[float, float]], as_of: datetime,
+                   p: dict[str, float], home_prior: tuple[float, float] = (0.1, 0.15)) -> AuxCountModel | None:
+    return _fit_aux(matches, values, as_of, p["xi"], sigma=p["sigma"], tau=AUX_TAU, home_prior=home_prior)
 
 
 def fit_all(con: sqlite3.Connection, as_of: datetime | None = None, params: dict[str, float] | None = None,
@@ -109,16 +169,53 @@ def fit_all(con: sqlite3.Connection, as_of: datetime | None = None, params: dict
     gm, matches, _ = fit_goal_model(con, as_of, params["xi"], params["sigma"], params["tau"], params.get("alpha", 1.0),
                                     params.get("cal_t", 1.0), params.get("cal_g", 1.0), params.get("xg_weight", 0.0))
     before = gm.as_of
-    shots = corners = None
+    shots = corners = cards = reds = None
+    aux_p = load_aux_params(con)
+    ht_share: dict[str, float] | None = None
     if with_aux:
         shots = _fit_aux(matches, _stat_values(con, before, "shots"), as_of, params["xi"])
-        corners = _fit_aux(matches, _stat_values(con, before, "corners"), as_of, params["xi"])
         # Örneklem içi k aşırı uyum yüzünden Poisson'a kayar; varsa backtest'in örneklem dışı k'sı kullanılır
         disp = db.meta_get(con, "aux_dispersion") or {}
-        for aux, key, fallback in ((shots, "shots", 12.0), (corners, "corners", 25.0)):
-            if aux is not None:
-                aux.k = float(disp.get(key, min(aux.k, fallback)))
-    return FittedModels(as_of, gm, shots, corners, PlayerStore(con, as_of), own_goal_rate(con, before), params)
+        if shots is not None:
+            shots.k = float(disp.get("shots", min(shots.k, 12.0)))
+        # Korner / kart / kırmızı: ayar ve dağılım parametreleri backtest.tune_aux'tan (ayarlama + doğrulama dilimi)
+        corners = fit_aux_family(matches, _stat_values(con, before, "corners"), as_of, aux_p["korner"])
+        cards = fit_aux_family(matches, _stat_values(con, before, "card_points"), as_of, aux_p["kart"])
+        reds = fit_aux_family(matches, _stat_values(con, before, "red_cards_90"), as_of, aux_p["kirmizi"], RED_HOME_PRIOR)
+        ht_share = card_ht_shares(con, before)
+    return FittedModels(as_of, gm, shots, corners, PlayerStore(con, as_of), own_goal_rate(con, before), params,
+                        cards, reds, aux_p, ht_share)
+
+
+def aux_joints(fm: FittedModels, comp: str, home: str, away: str, neutral: bool
+               ) -> tuple[dict[str, ax.CountJoint], dict[str, Any] | None, dict[str, Any] | None]:
+    """Korner ve kart ortak dağılımları + maç sayfası özetleri ({"korner": .., "kart": ..}, korner, kart)."""
+    joints: dict[str, ax.CountJoint] = {}
+    corners = cards = None
+    aux_p = fm.aux_params or load_aux_params()
+    if fm.corners is not None:
+        cm = fm.corners.means(comp, home, away, neutral)
+        if cm:
+            d = aux_dist(aux_p["korner"])
+            mh, ma = ax.shrink_means(cm[0], cm[1], fm.corners.league_total(comp, home, away, neutral), d.beta)
+            joints["korner"] = ax.count_joint(mh, ma, d, ax.CORNER_NMAX)
+            corners = ax.corner_view(joints["korner"], d)
+    if fm.cards is not None:
+        km = fm.cards.means(comp, home, away, neutral)
+        if km:
+            d = aux_dist(aux_p["kart"])
+            mh, ma = ax.shrink_means(km[0], km[1], fm.cards.league_total(comp, home, away, neutral), d.beta)
+            rm = fm.reds.means(comp, home, away, neutral) if fm.reds is not None else None
+            shares = fm.card_ht_share or {}
+            share = shares.get(comp, shares.get("__global__"))
+            joints["kart"] = ax.count_joint(mh, ma, d, ax.CARD_NMAX, ht_share=share,
+                                            p_red=ax.red_prob(rm[0], rm[1]) if rm else None)
+            cards = ax.card_view(joints["kart"], d, rm[0] if rm else None, rm[1] if rm else None)
+    return joints, corners, cards
+
+
+def aux_dist(p: dict[str, float]) -> ax.CountDist:
+    return ax.CountDist(p["k_total"], p["phi"], p.get("beta", 1.0))
 
 
 # ---------------------------------------------------------------- tahmin
@@ -126,6 +223,30 @@ def fit_all(con: sqlite3.Connection, as_of: datetime | None = None, params: dict
 def _family_validation(con: sqlite3.Connection) -> dict[str, bool]:
     v = db.meta_get(con, "family_validation") or {}
     return {k: bool(x.get("validated")) for k, x in v.items()} if isinstance(v, dict) else {}
+
+
+def _market_validation(con: sqlite3.Connection) -> dict[str, bool]:
+    """Pazar türü ve çizgi bazında doğrulama (korner/kart): "korner_au" -> bool, "korner_au 7.5" -> bool."""
+    v = db.meta_get(con, "family_validation") or {}
+    out: dict[str, bool] = {}
+    if isinstance(v, dict):
+        for x in v.values():
+            for part in ("markets", "lines"):
+                for key, r in ((x or {}).get(part) or {}).items():
+                    out[key] = bool((r or {}).get("validated"))
+    return out
+
+
+def market_validated(validated: dict[str, bool], market_ok: dict[str, bool], family: str, key: str,
+                     line: str | None) -> bool:
+    """Aile bayrağı + (varsa) pazar türü ve çizgi bayrakları."""
+    ok = validated.get(family, False) and market_ok.get(key, True)
+    if ok and line not in (None, ""):
+        try:
+            ok = market_ok.get(ax.line_name(key, line), True)
+        except ValueError:
+            pass
+    return ok
 
 
 def _blend_weight(con: sqlite3.Connection) -> tuple[float, bool]:
@@ -169,22 +290,47 @@ def standard_markets(j: mk.Joint) -> list[dict[str, Any]]:
 
 
 def iddaa_markets(con: sqlite3.Connection, event_id: int, sm_model: np.ndarray, j_model: mk.Joint, p1: float, rho: float,
-                  corners: dict | None, blend_w: float, validated: dict[str, bool],
-                  start: tuple[float, float]) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+                  aux: dict[str, ax.CountJoint] | None, blend_w: float, validated: dict[str, bool],
+                  start: tuple[float, float], market_ok: dict[str, bool] | None = None
+                  ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     rows = con.execute(
         """SELECT o.market_key, o.outcome_no, o.outcome_name, o.odd, o.mbs, o.fetched_at FROM odds_current o
            JOIN iddaa_events e ON e.id=o.event_id
            WHERE o.event_id=? AND e.active=1 AND e.is_live=0 ORDER BY o.market_key, o.outcome_no""",
         (event_id,),
     ).fetchall()
-    return markets_from_rows([dict(r) for r in rows], sm_model, j_model, p1, rho, corners, blend_w, validated, start)
+    return markets_from_rows([dict(r) for r in rows], sm_model, j_model, p1, rho, aux, blend_w, validated, start, market_ok)
+
+
+def _aux_market(md: MarketDef, sov: str | None, rs: list[dict[str, Any]], j: ax.CountJoint, blend_w: float
+                ) -> tuple[list[float], list[float], list[float], float | None] | None:
+    """Korner/kart pazarı: (p_model, p_market, pazar içi harman, marj) — skor matrisinden bağımsız, tek pazar içinde.
+    Tek yönlü sunulan pazarda (ör. yalnız "Kırmızı kart: Evet") marj arındırılamaz: piyasa olasılığı 1/oran (marjlı,
+    yani piyasanın gerçek olasılığından yüksek -> model daha emin görünmez), harman iki sonuçlu tamamlanmış pazarda."""
+    names = [r["outcome_name"] for r in rs]
+    odds = [float(r["odd"]) for r in rs]
+    pm = [ax.outcome_prob(md.key, sov, n, j) for n in names]
+    if any(v is None for v in pm):
+        return None
+    p_model = [float(v) for v in pm if v is not None]
+    if md.key in ONE_SIDED_KEYS and len(rs) == 1:
+        q1 = min(1.0 / odds[0], 0.999)
+        local = mk.blend([p_model[0], 1.0 - p_model[0]], [q1, 1.0 - q1], blend_w)
+        return p_model, [q1], [local[0]], None
+    if not mk.is_exhaustive(p_model):
+        return None
+    q = mk.devig(odds)
+    return p_model, q, mk.blend(p_model, q, blend_w), mk.margin(odds)
 
 
 def markets_from_rows(rows: list[dict[str, Any]], sm_model: np.ndarray, j_model: mk.Joint, p1: float, rho: float,
-                      corners: dict | None, blend_w: float, validated: dict[str, bool],
-                      start: tuple[float, float]) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+                      aux: dict[str, ax.CountJoint] | None, blend_w: float, validated: dict[str, bool],
+                      start: tuple[float, float], market_ok: dict[str, bool] | None = None
+                      ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """Oran satırlarından (market_key "t:st:sov", outcome_no, outcome_name, odd, mbs, fetched_at) model/piyasa/harman
-    pazarları. Canlıda satırlar iddaa bülteninden, scout backtest'inde geçmiş kapanış oranlarından gelir."""
+    pazarları. Canlıda satırlar iddaa bülteninden, scout backtest'inde geçmiş kapanış oranlarından gelir.
+    aux: korner/kart ortak dağılımları (aile -> CountJoint); market_ok: pazar başına doğrulama (yoksa aile bayrağı)."""
+    market_ok = market_ok or {}
     groups: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
         groups.setdefault(r["market_key"], []).append(r)
@@ -216,33 +362,41 @@ def markets_from_rows(rows: list[dict[str, Any]], sm_model: np.ndarray, j_model:
             continue
         sov_v = sov or None
         odds = [float(r["odd"]) for r in rs]
+        fam_ok = market_validated(validated, market_ok, md.family, md.key, sov_v)
+        if md.family in ax.FAMILIES:
+            # Korner/kart skor matrisinden bağımsız: tek pazar içinde harman (kendi içinde tutarlı); p_safe = p_local
+            j_aux = (aux or {}).get(md.family)
+            res = _aux_market(md, sov_v, rs, j_aux, blend_w) if j_aux is not None else None
+            if res is None:
+                continue
+            pm_a, q_a, loc_a, marg = res
+            outs_a = [{
+                "no": r["outcome_no"], "name": r["outcome_name"], "odd": float(r["odd"]),
+                "p_model": float(pm_a[i]), "p_market": float(q_a[i]), "p_blend": float(loc_a[i]), "p_safe": float(loc_a[i]),
+                "ev": float(loc_a[i] * float(r["odd"]) - 1.0), "ev_model": float(pm_a[i] * float(r["odd"]) - 1.0),
+            } for i, r in enumerate(rs)]
+            out.append({
+                "market_key": mkey, "key": md.key, "label": md.label, "family": md.family, "line": sov_v,
+                "mbs": rs[0]["mbs"], "margin": marg, "family_validated": fam_ok,
+                "fetched_at": rs[0]["fetched_at"], "outcomes": outs_a,
+            })
+            continue
         q = mk.devig(odds)
         p_model: list[float] = []
         p_blend: list[float] | None = []
         ok = True
-        if md.key == "korner_au":
-            # Korner skor matrisinden bağımsız: tek pazar içinde harman (kendi içinde tutarlı)
-            if corners is None or sov_v is None:
-                continue
-            alt, ust = mk.corner_over_prob(corners["mu_home"], corners["mu_away"], corners["k"], float(sov_v))
-            lookup = {"Alt": alt, "Üst": ust}
-            if any(r["outcome_name"] not in lookup for r in rs):
-                continue
-            p_model = [lookup[r["outcome_name"]] for r in rs]
-            p_blend = mk.blend(p_model, q, blend_w)
-        else:
-            for r in rs:
-                mask = mk.outcome_mask(md.key, sov_v, r["outcome_name"], j_model)
-                if mask is None:
-                    ok = False
-                    break
-                p_model.append(mk.prob(j_model, mask))
-                if j_blend is not None and p_blend is not None:
-                    p_blend.append(mk.prob(j_blend, mask))
-            if not ok:
-                continue
-            if j_blend is None:
-                p_blend = None
+        for r in rs:
+            mask = mk.outcome_mask(md.key, sov_v, r["outcome_name"], j_model)
+            if mask is None:
+                ok = False
+                break
+            p_model.append(mk.prob(j_model, mask))
+            if j_blend is not None and p_blend is not None:
+                p_blend.append(mk.prob(j_blend, mask))
+        if not ok:
+            continue
+        if j_blend is None:
+            p_blend = None
         if not mk.is_exhaustive(p_model):
             continue
         # Pazar içi harman GERÇEK iddaa olasılığıyla (projeksiyon hatası yok). Değer/EV için muhafazakâr olasılık:
@@ -261,7 +415,7 @@ def markets_from_rows(rows: list[dict[str, Any]], sm_model: np.ndarray, j_model:
             })
         out.append({
             "market_key": mkey, "key": md.key, "label": md.label, "family": md.family, "line": sov_v,
-            "mbs": rs[0]["mbs"], "margin": mk.margin(odds), "family_validated": validated.get(md.family, False),
+            "mbs": rs[0]["mbs"], "margin": mk.margin(odds), "family_validated": fam_ok,
             "fetched_at": rs[0]["fetched_at"], "outcomes": outs,
         })
     order = {d.key: i for i, d in enumerate(MARKETS.values())}
@@ -308,15 +462,9 @@ def predict_match(con: sqlite3.Connection, fm: FittedModels, match: sqlite3.Row,
     sm = fm.goals.matrix(lh, la)   # kalibre skor matrisi
     j = mk.build_joint(sm, p1)
     validated = _family_validation(con)
+    market_ok = _market_validation(con)
     blend_w, blend_calibrated = _blend_weight(con)
-
-    corners = None
-    if fm.corners:
-        cm = fm.corners.means(comp, home, away, neutral)
-        if cm:
-            corners = {"mu_home": cm[0], "mu_away": cm[1], "k": fm.corners.k,
-                       "lines": {str(L): dict(zip(("Alt", "Üst"), mk.corner_over_prob(cm[0], cm[1], fm.corners.k, L)))
-                                 for L in (7.5, 8.5, 9.5, 10.5, 11.5)}}
+    aux, corners, cards = aux_joints(fm, comp, home, away, neutral)
 
     iddaa = None
     ev = None if market_rows is not None else con.execute(
@@ -325,11 +473,11 @@ def predict_match(con: sqlite3.Connection, fm: FittedModels, match: sqlite3.Row,
         (match["id"],),
     ).fetchone()
     if market_rows:
-        mkts, minfo = markets_from_rows(market_rows, sm, j, p1, fm.goals.rho, corners, blend_w, validated, (lh, la))
+        mkts, minfo = markets_from_rows(market_rows, sm, j, p1, fm.goals.rho, aux, blend_w, validated, (lh, la), market_ok)
         if mkts:
             iddaa = {"event_id": None, "mbs": market_rows[0].get("mbs"), "markets": mkts, "market_model": minfo}
     if ev:
-        mkts, minfo = iddaa_markets(con, ev["id"], sm, j, p1, fm.goals.rho, corners, blend_w, validated, (lh, la))
+        mkts, minfo = iddaa_markets(con, ev["id"], sm, j, p1, fm.goals.rho, aux, blend_w, validated, (lh, la), market_ok)
         if mkts:
             iddaa = {"event_id": ev["id"], "mbs": ev["mbs"], "markets": mkts, "market_model": minfo}
 
@@ -349,6 +497,7 @@ def predict_match(con: sqlite3.Connection, fm: FittedModels, match: sqlite3.Row,
         "markets": standard_markets(j),
         "iddaa": iddaa,
         "corners": corners,
+        "cards": cards,
     })
     if with_sim and fm.shots is not None:
         smu = fm.shots.means(comp, home, away, neutral)

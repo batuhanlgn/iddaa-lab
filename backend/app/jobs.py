@@ -18,7 +18,10 @@ from typing import Callable
 
 from . import coupons, db
 from .blend import calibrate_blend
-from .ingest import backfill_periods, ingest_iddaa, ingest_scoreboards, ingest_summaries, iso, repair_missing_stats, utcnow
+from .ingest import (
+    backfill_card_points, backfill_periods, ingest_iddaa, ingest_iddaa_details, ingest_scoreboards, ingest_summaries, iso,
+    repair_missing_stats, utcnow,
+)
 from .matching import match_iddaa_events
 from .tracking import update_tracking
 
@@ -67,6 +70,7 @@ def _prepare(con, progress: Progress) -> None:
     """İdempotent veri hazırlığı: eksik istatistik onarımı + İY/90 dk skorları (eğitim bunlara dayanır)."""
     progress(f"Eksik istatistik onarımı: {repair_missing_stats(con)} maç")
     progress(f"Devre skorları (İY / 90 dk): {backfill_periods(con)} maç")
+    progress(f"Kart puanları (iddaa sayımı): {backfill_card_points(con)} maç")
     from .model.pipeline import compact_predictions
 
     progress(f"Tahmin arşivi sıkıştırma: {compact_predictions(con)} kayıt günlüğe aktarıldı")
@@ -103,10 +107,21 @@ def _iddaa_safe(con, progress: Progress) -> None:
         progress(f"UYARI: iddaa bülteni alınamadı ({type(e).__name__}: {e}); oranlar güncellenmedi")
 
 
+def _iddaa_details_safe(con, progress: Progress) -> None:
+    """Korner/kart pazarları maç detayından (eşleştirmeden sonra: yalnız modelin kapsadığı maçlar). Erişilemezse iş
+    çökmez; eski detay oranları kalır (kupon adayı olmaları için güncel olmaları gerekir)."""
+    try:
+        asyncio.run(ingest_iddaa_details(con, progress))
+    except Exception as e:  # noqa: BLE001 - kaynak hatası iş kaydına yazılır, diğer adımlar sürer
+        log.exception("iddaa maç detayları alınamadı")
+        progress(f"UYARI: iddaa maç detayları (korner/kart) alınamadı ({type(e).__name__}: {e})")
+
+
 def do_odds(con, progress: Progress) -> None:
     _prepare(con, progress)
     _iddaa_safe(con, progress)
     progress(f"Eşleştirme: {match_iddaa_events(con)}")
+    _iddaa_details_safe(con, progress)
     _predict(con, progress)
     _finish_cycle(con, progress)
 
@@ -118,6 +133,7 @@ def do_lineups(con, progress: Progress) -> None:
     _standings_safe(con, progress)
     _iddaa_safe(con, progress)
     progress(f"Eşleştirme: {match_iddaa_events(con)}")
+    _iddaa_details_safe(con, progress)
     _predict(con, progress)
     _finish_cycle(con, progress)
 
@@ -166,6 +182,7 @@ def do_refresh(con, progress: Progress) -> None:
     _prepare(con, progress)
     _iddaa_safe(con, progress)
     progress(f"Eşleştirme: {match_iddaa_events(con)}")
+    _iddaa_details_safe(con, progress)
     # Kalibrasyon tahminlerden ÖNCE: yeni tahminler ve kuponlar güncel ağırlıkla hesaplanır
     progress(f"Harman kalibrasyonu: {calibrate_blend(con)}")
     _predict(con, progress)

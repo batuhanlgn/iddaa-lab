@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { Suspense } from "react";
 import ErrorPanel from "@/components/ErrorPanel";
+import CornerCardPanel from "@/components/match/CornerCardPanel";
 import IddaaMarkets from "@/components/match/IddaaMarkets";
 import LeagueContext from "@/components/match/LeagueContext";
 import MatchHeader from "@/components/match/MatchHeader";
@@ -70,6 +71,8 @@ async function MatchData({ params }: Pick<PageProps<"/mac/[id]">, "params">) {
           </EmptyState>
         )}
       </section>
+
+      <CornerCardPanel d={d} />
 
       {d.similar !== undefined && <SimilarOdds data={d.similar} />}
 

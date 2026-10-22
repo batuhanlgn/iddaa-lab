@@ -12,6 +12,16 @@ TOKEN_PATH = DATA_DIR / ".local_api_token"
 ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 IDDAA_EVENTS_URL = "https://sportsbookv2.iddaa.com/sportsbook/events?st=1&type=0&version=0"
 IDDAA_COMPETITIONS_URL = "https://sportsbookv2.iddaa.com/sportsbook/competitions?st=1"
+IDDAA_EVENT_DETAIL_URL = "https://sportsbookv2.iddaa.com/sportsbook/event/{event_id}"
+
+# Maç detayı (korner/kart pazarları): modelin kapsadığı (ESPN maçıyla eşleşmiş) ve bu kadar saat içinde başlayacak maçlar
+IDDAA_DETAIL_HORIZON_H = 72
+IDDAA_DETAIL_REFRESH_H = 3.0          # maç başına son çekimden bu kadar saat geçtiyse yeniden çek
+IDDAA_DETAIL_NEAR_H = 6.0             # başlamaya bu kadar saat kala daha sık:
+IDDAA_DETAIL_NEAR_REFRESH_MIN = 30.0  # ... bu kadar dakikada bir
+IDDAA_DETAIL_MAX_PER_RUN = 300        # iş başına üst sınır (en yakın maçlar önce; ilk doldurma birkaç işe yayılır)
+IDDAA_DETAIL_CONCURRENCY = 2
+IDDAA_DETAIL_MIN_INTERVAL_S = 0.6
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) iddaa-lab/1.0 (kisisel analiz)"
 
@@ -97,6 +107,19 @@ RECHECK_DAYS = 3
 N_SIMS = 10_000
 N_SCENARIOS = 3
 MAX_GOALS = 10
+
+# Korner / kart / kırmızı kart modelleri (takım başına sayım, model/aux_markets.py). Backtest (tune_aux) ayarlama diliminde
+# xi/sigma'yı, ayarlama+doğrulama dilimlerinde dağılım parametrelerini seçip meta "aux_params"a yazar; yoksa bunlar.
+# Varsayılanlar 22 Eki 2026 tune_aux sonucu (veri 15 Eki'ye kadar); ilk haftalık backtest'e kadar bunlar kullanılır.
+# Eski korner modelinde sigma 0.25 takım etkilerini aşırı uyduruyordu; yeni ızgara 0.05–0.15.
+AUX_DEFAULT_PARAMS: dict[str, dict[str, float]] = {
+    "korner": {"xi": 0.005, "sigma": 0.15, "k_total": 30.0, "phi": 11.5, "beta": 0.5},
+    "kart": {"xi": 0.005, "sigma": 0.15, "k_total": 15.0, "phi": 1000.0, "beta": 0.6},
+    "kirmizi": {"xi": 0.005, "sigma": 0.05},
+}
+AUX_TAU = 0.3                 # lig ortalaması prior std (korner/kart)
+AUX_HT_SHARE_PRIOR = 200.0    # ilk yarı kart payında lig verisinin genel paya büzülme ağırlığı (kart puanı)
+AUX_BASE_PRIOR = 20.0         # backtest lig taban oranında genel orana büzülme ağırlığı (maç)
 
 # Varsayılan model hiperparametreleri; walk-forward ayarlama (tune) sonucu data/model_params.json'a yazılır
 DEFAULT_XI = 0.0025  # gün başına zaman sönümü (yarı ömür ~277 gün)

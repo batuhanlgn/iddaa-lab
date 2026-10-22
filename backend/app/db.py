@@ -58,6 +58,9 @@ CREATE TABLE IF NOT EXISTS team_match_stats (
     yellow INTEGER,
     red INTEGER,
     fouls INTEGER,
+    card_points INTEGER,              -- iddaa kart sayımı (sarı 1, kırmızı 2), 90 dk; keyEvents'tan (espn.card_counts)
+    card_points_ht INTEGER,           -- aynı sayım, yalnız ilk yarı
+    red_cards_90 INTEGER,             -- 90 dakikadaki kırmızı kart sayısı (keyEvents)
     PRIMARY KEY (match_id, team_id)
 );
 
@@ -342,6 +345,11 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("matches", "ft90_home", "ALTER TABLE matches ADD COLUMN ft90_home INTEGER"),
     ("matches", "ft90_away", "ALTER TABLE matches ADD COLUMN ft90_away INTEGER"),
     ("iddaa_events", "active", "ALTER TABLE iddaa_events ADD COLUMN active INTEGER NOT NULL DEFAULT 1"),
+    # Maç detayı (korner/kart pazarları) en son ne zaman çekildi
+    ("iddaa_events", "detail_fetched_at", "ALTER TABLE iddaa_events ADD COLUMN detail_fetched_at TEXT"),
+    ("team_match_stats", "card_points", "ALTER TABLE team_match_stats ADD COLUMN card_points INTEGER"),
+    ("team_match_stats", "card_points_ht", "ALTER TABLE team_match_stats ADD COLUMN card_points_ht INTEGER"),
+    ("team_match_stats", "red_cards_90", "ALTER TABLE team_match_stats ADD COLUMN red_cards_90 INTEGER"),
     ("hist_odds_matches", "o_over25", "ALTER TABLE hist_odds_matches ADD COLUMN o_over25 REAL"),
     ("hist_odds_matches", "o_under25", "ALTER TABLE hist_odds_matches ADD COLUMN o_under25 REAL"),
 )

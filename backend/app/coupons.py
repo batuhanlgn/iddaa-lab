@@ -6,6 +6,9 @@
 - Maç başına tek seçim; MBS kuralı uygulanır; kupon olasılığı "bağımsızlık varsayımıyla" hesaplanır.
 - Değer koşulu sağlanmazsa kupon üretilmez ("bugün uygun değer kuponu yok").
 - Üretilen kuponlar zaman damgasıyla arşivlenir ve sonuçlanınca 1 sanal birimle ileriye dönük ROI izlenir.
+- Korner ve kart kuponları (kullanıcı kararı, 22 Eki 2026): o ailenin pazarlarından, modelin piyasa kadar ya da daha
+  emin olduğu seçimler içinde en emin 2-3 seçim (farklı maçlar). Scout kapısı uygulanmaz (scout korner/kart
+  değerlendirmiyor). Aile/pazar backtest'te doğrulanmadıysa kupon "deneysel" etiketiyle yine üretilir.
 """
 from __future__ import annotations
 
@@ -26,6 +29,7 @@ from .config import (
     PICK_GOALS_MIN_ODDS, PICK_GOALS_MIN_P, PICK_MS_MIN_ODDS, PICK_MS_MIN_P, PLAYER_PICK_MAX_P, PLAYER_PICK_MIN_P,
     PLAYER_PICK_MIN_START, VALUE_EV_THRESHOLD, VALUE_MAX_MODEL_MARKET_RATIO, VALUE_MAX_ODDS, VALUE_MIN_ODDS,
 )
+from .model import aux_markets as ax
 from .model import markets as mk
 
 
@@ -74,13 +78,17 @@ def latest_predictions(con: sqlite3.Connection, days: float, min_lead_minutes: i
 
 
 ODDS_MAX_AGE = timedelta(hours=3)
+# Korner/kart oranları maç detayından 3 saatte bir (başlamaya 6 saat kala 30 dakikada bir) yenilenir; 15 dakikalık iş
+# aralığında yenilenene kadar aday dışı kalmasınlar diye bir saat pay
+DETAIL_ODDS_MAX_AGE = timedelta(hours=4)
+AUX_FAMILIES = ax.FAMILIES
 
 
-def _fresh(fetched_at: str | None) -> bool:
+def _fresh(fetched_at: str | None, family: str = "") -> bool:
     if not fetched_at:
         return False
     t = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
-    return datetime.now(timezone.utc) - t <= ODDS_MAX_AGE
+    return datetime.now(timezone.utc) - t <= (DETAIL_ODDS_MAX_AGE if family in AUX_FAMILIES else ODDS_MAX_AGE)
 
 
 def candidates(preds: list[dict[str, Any]], require_confidence: bool = True, require_fresh: bool = True) -> list[Selection]:
@@ -92,7 +100,7 @@ def candidates(preds: list[dict[str, Any]], require_confidence: bool = True, req
         if require_confidence and conf in ("düşük", "yok"):
             continue
         for m in p["iddaa"]["markets"]:
-            if require_fresh and not _fresh(m.get("fetched_at")):
+            if require_fresh and not _fresh(m.get("fetched_at"), m.get("family", "")):
                 continue
             for o in m["outcomes"]:
                 if o.get("p_blend") is None or o.get("ev") is None:
@@ -258,24 +266,53 @@ def _mix_ok(sels: list[Selection] | tuple[Selection, ...]) -> bool:
     return all(v <= MAX_SAME_MARKET for v in counts.values())
 
 
-def _fit_mbs(ranked: list[Selection], size: int) -> list[Selection]:
-    """Sıralı adaylardan tam 'size' seçim; her seçimin MBS'si kupon boyuna sığmalı ve aynı pazar türünden en fazla
-    MAX_SAME_MARKET seçim olmalı. Sağlanamazsa boş liste (geçersiz/kısmi kupon üretilmez)."""
+def _fit_mbs(ranked: list[Selection], size: int, mix: bool = True) -> list[Selection]:
+    """Sıralı adaylardan tam 'size' seçim; her seçimin MBS'si kupon boyuna sığmalı ve (mix ise) aynı pazar türünden en
+    fazla MAX_SAME_MARKET seçim olmalı. Sağlanamazsa boş liste (geçersiz/kısmi kupon üretilmez)."""
     chosen: list[Selection] = []
     for s in ranked:
         if len(chosen) >= size:
             break
-        if s.mbs <= size and _mix_ok([*chosen, s]):
+        if s.mbs <= size and (not mix or _mix_ok([*chosen, s])):
             chosen.append(s)
     return chosen if len(chosen) == size else []
 
 
-def _best_size(ranked: list[Selection], sizes: tuple[int, ...]) -> list[Selection]:
+def _best_size(ranked: list[Selection], sizes: tuple[int, ...], mix: bool = True) -> list[Selection]:
     for size in sizes:
-        sel = _fit_mbs(ranked, size)
+        sel = _fit_mbs(ranked, size, mix)
         if sel:
             return sel
     return []
+
+
+AUX_COUPON_SIZES = (3, 2)   # korner/kart kuponu: en emin 3 seçim, yoksa 2
+AUX_COUPON_TITLES = {"korner": "Korner kuponu", "kart": "Kart kuponu"}
+AUX_COUPON_MARKETS = {
+    "korner": "toplam korner A/Ü, korner aralığı, takım korner A/Ü, kim daha çok korner, korner handikabı",
+    "kart": "toplam kart A/Ü, ilk yarı kart A/Ü, kim daha çok kart, kırmızı kart",
+}
+
+
+def aux_coupon(fam: str, cands: list[Selection], live: dict[tuple[int, str, int], float]) -> dict[str, Any]:
+    """Korner / kart kuponu: o ailenin bültende aynı oranla duran (oran ≥ MIN_SELECTION_ODDS) ve modelin piyasa kadar ya
+    da daha emin olduğu (p_model ≥ p_piyasa) seçimleri; maç başına modelin en emin olduğu tek seçim, en emin 2-3 maç,
+    MBS kuralı. Aile ya da seçilen pazar türü doğrulanmadıysa kupon deneysel."""
+    pool = [c for c in cands if c.family == fam and c.odd >= MIN_SELECTION_ODDS and _still_offered(c, live)
+            and c.p_model >= c.p_market]
+    sel = _best_size(_best_per_match(pool, lambda c: c.p_model), AUX_COUPON_SIZES, mix=False)
+    experimental = bool(sel) and any(not c.family_validated for c in sel)
+    note = " Deneysel: model backtest'te doğrulanmadı." if experimental else ""
+    return {
+        "kind": fam, "title": AUX_COUPON_TITLES[fam], "experimental": experimental, "scout_gated": False,
+        "description": (f"{AUX_COUPON_MARKETS[fam].capitalize()} pazarlarından, modelin en az piyasa kadar emin olduğu "
+                        f"(model olasılığı ≥ piyasanın marjsız olasılığı) ve oranı ≥ {MIN_SELECTION_ODDS:.2f} seçimler "
+                        "içinde modelin en emin olduğu 2-3 maç (maç başına tek seçim). Scout bu pazarları "
+                        f"değerlendirmediği için scout onayı aranmaz.{note}"),
+        "empty_reason": None if sel else (f"Bültende modelin piyasa kadar emin olduğu, MBS'yi sağlayan en az 2 maçlık "
+                                          f"{fam} seçimi yok ({len(pool)} aday)."),
+        **combine(sel),
+    }
 
 
 def _plausible(c: Selection) -> bool:
@@ -459,6 +496,11 @@ def generate(con: sqlite3.Connection, days: float = 3.0, archive: bool = False) 
         k["description"] = f"Yalnız scout'un onayladığı seçimler (kanıtlar aynı yönde). {k['description']}"
         k["scout_gated"] = True
 
+    # 8-9) Korner ve kart kuponları (scout kapısı yok: scout bu pazarları değerlendirmiyor)
+    aux_cands = [c for c in candidates(preds) if c.family in AUX_FAMILIES]
+    for fam in AUX_FAMILIES:
+        kinds.append(aux_coupon(fam, aux_cands, live))
+
     created = _iso(datetime.now(timezone.utc))
     # "Günün kuponu": her tür için İstanbul gününde ilk oluşturulan (boş olmayan) kupon kilitlenir ve gün boyu
     # gösterilir; oranlar/model her güncellemede biraz değişse de kupon değişmez, geçmişe günde tür başına tek kayıt düşer.
@@ -532,17 +574,10 @@ def settle_selection(con: sqlite3.Connection, s: dict[str, Any]) -> str | None:
         return "void"  # ertelendi / iptal: iddaa kuralında oran 1.00 sayılır
     if s["key"] == "oyuncu":
         return _settle_player(con, m, s)
+    if s["key"] in ax.AUX_KEYS:
+        return _settle_aux(con, m, s)
     if not m["completed"] or m["ft90_home"] is None:
         return None  # 90 dk skoru doğrulanmadan (ör. uzatmalı maç, özet yok) sonuçlandırılmaz
-    if s["key"] == "korner_au":
-        if m["extra_time"]:
-            return None  # korner istatistiği uzatmayı da içerir; 90 dk değeri bilinmiyor
-        rows = con.execute("SELECT corners FROM team_match_stats WHERE match_id=?", (m["id"],)).fetchall()
-        if len(rows) != 2 or any(r["corners"] is None for r in rows):
-            return None
-        tot = sum(r["corners"] for r in rows)
-        line = float(s["line"])
-        return "won" if (s["outcome_name"] == "Üst" and tot > line) or (s["outcome_name"] == "Alt" and tot < line) else "lost"
     needs_ht = s["family"] == "iy" or s["key"] in ("iy", "iy2", "iy_cs", "iy_kg", "iy_au", "iyms", "cgy")
     if needs_ht and m["home_ht"] is None:
         return None
@@ -555,6 +590,30 @@ def settle_selection(con: sqlite3.Connection, s: dict[str, Any]) -> str | None:
     if mask is None:
         return None
     return "won" if bool(mask) else "lost"
+
+
+def _settle_aux(con: sqlite3.Connection, m: sqlite3.Row, s: dict[str, Any]) -> str | None:
+    """Korner / kart seçimi: 90 dakika değerleri (team_match_stats). Korner istatistiği uzatmaları da içerdiğinden
+    uzatmalı maçta sonuçlandırılmaz; kart puanı ve kırmızı kart olaylardan 90 dk için sayıldığından sonuçlanır."""
+    if not m["completed"]:
+        return None
+    rows = {int(r["is_home"]): r for r in con.execute(
+        "SELECT is_home, corners, card_points, card_points_ht, red_cards_90 FROM team_match_stats WHERE match_id=?",
+        (m["id"],))}
+    if 0 not in rows or 1 not in rows:
+        return None
+    h, a = rows[1], rows[0]
+    if s["key"] in ("korner_au", "korner_ar", "ev_korner_au", "dep_korner_au", "korner_kdc", "korner_hnd"):
+        if m["extra_time"] or h["corners"] is None or a["corners"] is None:
+            return None
+        obs = ax.AuxResult(int(h["corners"]), int(a["corners"]))
+    else:
+        if h["card_points"] is None or a["card_points"] is None:
+            return None
+        ht = None if h["card_points_ht"] is None or a["card_points_ht"] is None else int(h["card_points_ht"]) + int(a["card_points_ht"])
+        reds = None if h["red_cards_90"] is None or a["red_cards_90"] is None else int(h["red_cards_90"]) + int(a["red_cards_90"])
+        obs = ax.AuxResult(int(h["card_points"]), int(a["card_points"]), ht, reds)
+    return ax.settle(s["key"], s.get("line"), s["outcome_name"], obs)
 
 
 _PLAYER_RULES = {"sot1": ("shots_on_target", 1), "sot2": ("shots_on_target", 2), "shots2": ("shots", 2),

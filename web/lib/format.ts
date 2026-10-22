@@ -69,6 +69,10 @@ export const OUTCOME_LABEL: Record<string, string> = { "1": "Ev", "0": "Beraberl
 /** Çizgi metni. Handikap iddaa notasyonuyla: sov = ev sahibine eklenen gol -> +1 "(1:0)", -2 "(0:2)". */
 export function lineText(labelOrKey: string, line: string | null): string {
   if (line == null || line === "") return "";
+  if (labelOrKey === "korner_hnd" || labelOrKey === "Korner Handikap") {
+    const v = Number(line);
+    return Number.isFinite(v) ? `(ev ${v > 0 ? "+" : ""}${v})` : line;
+  }
   if (labelOrKey === "hnd" || labelOrKey.startsWith("Handikap")) {
     const v = Number(line);
     if (!Number.isFinite(v)) return line;

@@ -5,7 +5,7 @@ import { SelectionLine } from "./CouponCard";
 
 export const KIND: Record<string, string> = {
   deger: "Değer", olasilik: "Yüksek olasılık", dengeli: "Dengeli", oyuncu: "Oyuncu", tekli: "Tekli",
-  sistem_2_3: "Sistem 2/3", sistem_3_4: "Sistem 3/4", surpriz: "Sürpriz",
+  sistem_2_3: "Sistem 2/3", sistem_3_4: "Sistem 3/4", surpriz: "Sürpriz", korner: "Korner", kart: "Kart",
 };
 const STATUS: Record<string, { label: string; cls: string }> = {
   open: { label: "● açık", cls: "text-ink-2" },

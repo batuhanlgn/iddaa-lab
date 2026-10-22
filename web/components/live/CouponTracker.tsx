@@ -159,7 +159,9 @@ export default function CouponTracker({
 const ST_KEY: Record<string, string> = {
   "1:1": "ms", "2:92": "cs", "2:88": "iy", "2:36": "iy2", "2:77": "iy_cs", "2:89": "kg", "2:720": "iy_kg", "2:101": "au",
   "2:60": "iy_au", "2:603": "ev_au", "2:604": "dep_au", "2:100": "hnd", "2:90": "iyms", "2:91": "tc", "2:4": "tg",
-  "2:6": "cgy", "2:7": "ms_au", "2:698": "ms_kg", "2:700": "au_kg", "2:48": "korner_au",
+  "2:6": "cgy", "2:7": "ms_au", "2:698": "ms_kg", "2:700": "au_kg", "2:48": "korner_au", "2:67": "korner_ar",
+  "2:822": "ev_korner_au", "2:823": "dep_korner_au", "2:52": "korner_kdc", "2:863": "korner_hnd", "2:658": "kart_au",
+  "2:865": "iy_kart_au", "2:824": "kart_kdc", "2:17": "kirmizi",
 };
 
 function keyFromLabel(marketKey: string): string {

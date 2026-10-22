@@ -59,11 +59,6 @@ def test_devig_and_blend_normalize():
     assert mk.blend([0.5, 0.3, 0.2], q, 1.0) == pytest.approx([0.5, 0.3, 0.2])
 
 
-def test_corner_probs_complement_on_half_line():
-    alt, ust = mk.corner_over_prob(5.2, 4.4, 20.0, 9.5)
-    assert alt + ust == pytest.approx(1.0, abs=1e-6)
-
-
 def test_count_model_recovers_strength_order():
     rng = np.random.default_rng(0)
     teams = [f"t{i}" for i in range(6)]

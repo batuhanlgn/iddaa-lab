@@ -12,6 +12,8 @@ const ACCENT: Record<CouponKind, string> = {
   sistem_2_3: "var(--accent)",
   sistem_3_4: "var(--accent)",
   surpriz: "var(--critical)",
+  korner: "var(--home)",
+  kart: "var(--warn)",
 };
 
 function SystemBlock({ sys }: { sys: SystemInfo }) {

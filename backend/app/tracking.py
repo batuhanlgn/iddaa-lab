@@ -17,7 +17,8 @@ from . import db
 from .coupons import settle_selection
 from .model import markets as mk
 
-FAMILY_LABEL = {"ms": "Maç sonucu", "au": "Gol (A/Ü)", "kg": "Karşılıklı gol", "iy": "İlk yarı", "korner": "Korner"}
+FAMILY_LABEL = {"ms": "Maç sonucu", "au": "Gol (A/Ü)", "kg": "Karşılıklı gol", "iy": "İlk yarı", "korner": "Korner",
+                "kart": "Kart"}
 
 
 def closing_odds(con: sqlite3.Connection, event_id: int, market_key: str, kickoff: str) -> dict[int, float]:

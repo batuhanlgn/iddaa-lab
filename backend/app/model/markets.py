@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
-from scipy.stats import binom, nbinom
+from scipy.stats import binom
 
 from ..config import MAX_GOALS
 
@@ -127,20 +127,6 @@ STANDARD_MARKETS: list[tuple[str, str | None, list[str]]] = [
     ("cgy", None, ["1.", "Eşit", "2."]),
     ("ms_kg", None, ["1 ve Var", "1 ve Yok", "0 ve Var", "0 ve Yok", "2 ve Var", "2 ve Yok"]),
 ]
-
-
-def corner_over_prob(mu_h: float, mu_a: float, k: float, line: float, nmax: int = 40) -> tuple[float, float]:
-    """İki bağımsız NB toplamı için P(Alt), P(Üst)."""
-    x = np.arange(nmax + 1)
-
-    def pmf(mu: float) -> np.ndarray:
-        p = k / (k + mu)
-        v = nbinom.pmf(x, k, p)
-        return v / v.sum()
-
-    tot = np.convolve(pmf(mu_h), pmf(mu_a))
-    t = np.arange(tot.size)
-    return float(tot[t < line].sum()), float(tot[t > line].sum())
 
 
 def devig(odds: list[float]) -> list[float]:

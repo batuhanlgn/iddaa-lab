@@ -8,11 +8,12 @@ import { dateTime } from "@/lib/format";
 import { BackendError, getJSON } from "@/lib/server-api";
 import type { CouponHistoryResponse, CouponsResponse } from "@/lib/types";
 
-const FAM: Record<string, string> = { ms: "Maç sonucu", au: "Alt/Üst", kg: "KG", iy: "İlk yarı", korner: "Korner" };
+const FAM: Record<string, string> = { ms: "Maç sonucu", au: "Alt/Üst", kg: "KG", iy: "İlk yarı", korner: "Korner", kart: "Kart" };
 const COUPON_GROUPS: { title: string; kinds: string[] }[] = [
   { title: "Kısa kuponlar · tutma olasılığı yüksek", kinds: ["tekli", "olasilik", "sistem_2_3", "sistem_3_4"] },
   { title: "Değer ve sürpriz · model piyasadan farklı düşünüyor", kinds: ["deger", "dengeli", "surpriz"] },
   { title: "Oyuncu tahminleri", kinds: ["oyuncu"] },
+  { title: "Korner ve kart · scout onayı aranmaz, doğrulanmadıysa deneysel", kinds: ["korner", "kart"] },
 ];
 
 async function Generated() {

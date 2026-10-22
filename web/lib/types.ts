@@ -127,10 +127,43 @@ export interface IddaaMarket {
   family: string;
   line: string | null;
   mbs: number | null;
-  margin: number;
+  /** null: tek yönlü sunulan pazar (ör. yalnız "Kırmızı kart: Evet"), marj hesaplanamaz */
+  margin: number | null;
   family_validated: boolean;
   fetched_at: string;
   outcomes: IddaaOutcome[];
+}
+
+export type AltUst = { Alt: number; "Üst": number };
+export type ThreeWay = { "1": number; "0": number; "2": number };
+
+/** Korner modeli: takım başına beklenen korner + ortak dağılımdan çizgi olasılıkları (eski yüklerde yalnız lines) */
+export interface CornerModel {
+  mu_home: number;
+  mu_away: number;
+  k: number;
+  phi?: number;
+  lines: Record<string, AltUst>;
+  home_lines?: Record<string, AltUst>;
+  away_lines?: Record<string, AltUst>;
+  kdc?: ThreeWay;
+  ranges?: Record<string, number>;
+  handicap?: Record<string, { "1": number; "2": number }>;
+}
+
+/** Kart modeli (iddaa sayımı: sarı 1, kırmızı 2; ikinci sarıdan kırmızı 1+2) */
+export interface CardModel {
+  mu_home: number;
+  mu_away: number;
+  k: number;
+  phi: number;
+  lines: Record<string, AltUst>;
+  ht_lines: Record<string, AltUst>;
+  ht_share: number | null;
+  kdc: ThreeWay;
+  p_red: number | null;
+  red_home: number | null;
+  red_away: number | null;
 }
 
 export interface DistSummary {
@@ -250,7 +283,8 @@ export interface MatchDetail {
     markets: IddaaMarket[];
     market_model: { lambda_home: number; lambda_away: number; kl: number; ms_market_fit: number[]; ms_blend: number[] } | null;
   } | null;
-  corners?: { mu_home: number; mu_away: number; k: number; lines: Record<string, { Alt: number; "Üst": number }> } | null;
+  corners?: CornerModel | null;
+  cards?: CardModel | null;
   sim?: Simulation;
   odds_history_ms: { outcome_no: number; odd: number; fetched_at: string }[];
   form: Record<"home" | "away", FormMatch[]>;
@@ -369,7 +403,8 @@ export interface SystemInfo {
   min_win_odds: number;
 }
 
-export type CouponKind = "deger" | "olasilik" | "dengeli" | "oyuncu" | "tekli" | "sistem_2_3" | "sistem_3_4" | "surpriz";
+export type CouponKind =
+  | "deger" | "olasilik" | "dengeli" | "oyuncu" | "tekli" | "sistem_2_3" | "sistem_3_4" | "surpriz" | "korner" | "kart";
 
 export interface GeneratedCoupon extends CouponCombination {
   kind: CouponKind;
@@ -378,6 +413,8 @@ export interface GeneratedCoupon extends CouponCombination {
   description: string;
   empty_reason: string | null;
   experimental: boolean;
+  /** false: scout onayı aranmayan türler (korner, kart); eski yüklerde yok */
+  scout_gated?: boolean;
   archived_id?: number;
   /** Günün kuponu: bu saatte kilitlendi, gün boyu değişmez */
   locked_at?: string;
@@ -464,6 +501,35 @@ export interface FamilySummary {
   simple_logloss?: number;
   calibration: CalibrationBin[];
   ece?: number;
+  /** korner / kart: pazar türü ve çizgi bazında değerlendirme (backtest.aux_validation) */
+  markets?: Record<string, AuxCriterion>;
+  lines?: Record<string, AuxCriterion>;
+}
+
+export interface FamilyValidation {
+  validated?: boolean;
+  ece?: number;
+  n?: number;
+  gain?: number;
+  /** korner / kart: pazar türü ve çizgi bayrakları (çizgi: pazar türü doğrulandı ve o çizgide kazanç > 0) */
+  markets?: Record<string, { validated: boolean; n: number; gain: number; ece: number }>;
+  lines?: Record<string, { validated: boolean; n: number; gain: number; ece: number }>;
+}
+
+export interface AuxCriterion {
+  n: number;
+  model_logloss: number;
+  base_logloss: number;
+  gain: number;
+  ece: number;
+  validated: boolean;
+}
+
+export interface AuxTuningFamily {
+  grid: { xi: number; sigma: number; k_total: number; phi: number; mean_logloss: number; n: number }[];
+  chosen?: Record<string, number>;
+  n_dist?: number;
+  note?: string;
 }
 
 export interface Backtest {
@@ -474,8 +540,15 @@ export interface Backtest {
   tuning: { xi: number; sigma: number; ms_logloss: number; n: number }[];
   summary: Record<string, FamilySummary>;
   by_league: Record<string, { n: number; model_logloss: number; base_logloss: number }>;
-  family_validation: Record<string, { validated?: boolean; ece?: number; n?: number; gain?: number }>;
+  family_validation: Record<string, FamilyValidation>;
   dispersion?: Record<string, number>;
+  /** backend/app/backtest.py tune_aux (korner / kart / kırmızı kart ayarı); eski yüklerde yok */
+  aux_tuning?: {
+    korner?: AuxTuningFamily;
+    kart?: AuxTuningFamily;
+    kirmizi?: { grid: { xi: number; sigma: number; logloss: number; n: number }[]; chosen: Record<string, number> };
+    params?: Record<string, Record<string, number>>;
+  };
   alpha_tuning?: { alpha: number; goal_families_logloss: number }[];
   score_calibration?: { t: number; g: number; used: boolean; eval_ll_raw: number; eval_ll_cal: number };
   /** backend/app/backtest.py tune_xg_weight */

@@ -5,12 +5,18 @@ import asyncio
 import json
 import logging
 import sqlite3
+import time
 import zlib
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Callable
 
 from . import db
-from .config import HISTORY_MONTHS, LEAGUE_BY_SLUG, LEAGUES, RECHECK_DAYS, SUMMARY_MONTHS
+from .config import (
+    HISTORY_MONTHS, IDDAA_DETAIL_CONCURRENCY, IDDAA_DETAIL_HORIZON_H, IDDAA_DETAIL_MAX_PER_RUN, IDDAA_DETAIL_MIN_INTERVAL_S,
+    IDDAA_DETAIL_NEAR_H, IDDAA_DETAIL_NEAR_REFRESH_MIN, IDDAA_DETAIL_REFRESH_H, LEAGUE_BY_SLUG, LEAGUES, RECHECK_DAYS,
+    SUMMARY_MONTHS,
+)
 from .sources import espn, iddaa
 from .sources.http import FetchError, PoliteClient
 
@@ -119,9 +125,12 @@ def _store_summary(con: sqlite3.Connection, league: str, match_id: str, payload:
     con.execute("DELETE FROM player_match WHERE match_id=?", (match_id,))
     con.execute("DELETE FROM goal_events WHERE match_id=?", (match_id,))
     for t in parsed.team_stats:
+        cc = parsed.cards.get(t.team_id)
         con.execute(
-            "INSERT INTO team_match_stats VALUES(?,?,?,?,?,?,?,?,?,?)",
-            (match_id, t.team_id, int(t.is_home), t.shots, t.shots_on_target, t.corners, t.possession, t.yellow, t.red, t.fouls),
+            """INSERT INTO team_match_stats(match_id, team_id, is_home, shots, shots_on_target, corners, possession, yellow,
+                   red, fouls, card_points, card_points_ht, red_cards_90) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (match_id, t.team_id, int(t.is_home), t.shots, t.shots_on_target, t.corners, t.possession, t.yellow, t.red, t.fouls,
+             cc.points if cc else None, cc.points_ht if cc else None, cc.reds if cc else None),
         )
     for p in parsed.players:
         con.execute(
@@ -223,6 +232,31 @@ def _odds_signature(rows: list[tuple[str, int, float]]) -> dict[tuple[str, int],
     return {(k, n): o for k, n, o in rows}
 
 
+def is_detail_key(market_key: str) -> bool:
+    """market_key "t:st:sov" maç detayından çekilen bir aileye (korner, kart) mi ait?"""
+    parts = market_key.split(":")
+    try:
+        return (int(parts[0]), int(parts[1])) in iddaa.DETAIL_MARKETS
+    except (ValueError, IndexError):
+        return False
+
+
+def _write_markets(con: sqlite3.Connection, event_id: int, markets: list[iddaa.Market], fetched_at: str,
+                   prev: dict[tuple[str, int], float]) -> int:
+    """Pazarları odds_current'a yazar; önceki orandan farklı olanları odds_history'ye arşivler (değişen sayısı)."""
+    changed = 0
+    for m in markets:
+        for o in m.outcomes:
+            con.execute(
+                "INSERT OR REPLACE INTO odds_current VALUES(?,?,?,?,?,?,?)",
+                (event_id, m.market_key, o.no, o.name, o.odd, m.mbs, fetched_at),
+            )
+            if prev.get((m.market_key, o.no)) != o.odd:
+                con.execute("INSERT INTO odds_history VALUES(?,?,?,?,?)", (event_id, m.market_key, o.no, o.odd, fetched_at))
+                changed += 1
+    return changed
+
+
 async def ingest_iddaa(con: sqlite3.Connection, progress: Progress) -> dict[str, int]:
     async with PoliteClient(concurrency=1, min_interval=1.0) as client:
         comps_payload = await iddaa.fetch_competitions(client)
@@ -254,28 +288,93 @@ async def ingest_iddaa(con: sqlite3.Connection, progress: Progress) -> dict[str,
                 # canlı oranlar maç öncesi modelle karşılaştırılamaz; eski maç öncesi oranlar da geçersiz
                 con.execute("DELETE FROM odds_current WHERE event_id=?", (e.id,))
                 continue
-            prev = _odds_signature(
-                [
-                    (r["market_key"], r["outcome_no"], r["odd"])
-                    for r in con.execute("SELECT market_key, outcome_no, odd FROM odds_current WHERE event_id=?", (e.id,))
-                ]
-            )
-            con.execute("DELETE FROM odds_current WHERE event_id=?", (e.id,))
-            for m in e.markets:
-                for o in m.outcomes:
-                    con.execute(
-                        "INSERT OR REPLACE INTO odds_current VALUES(?,?,?,?,?,?,?)",
-                        (e.id, m.market_key, o.no, o.name, o.odd, m.mbs, fetched_at),
-                    )
-                    if prev.get((m.market_key, o.no)) != o.odd:
-                        con.execute(
-                            "INSERT INTO odds_history VALUES(?,?,?,?,?)", (e.id, m.market_key, o.no, o.odd, fetched_at)
-                        )
-                        changed += 1
+            cur_rows = con.execute("SELECT market_key, outcome_no, odd FROM odds_current WHERE event_id=?", (e.id,)).fetchall()
+            prev = _odds_signature([(r["market_key"], r["outcome_no"], r["odd"]) for r in cur_rows])
+            # Toplu bültenin kapsadığı pazarlar yenilenir; maç detayından gelen (korner/kart) oranlar detay çekimine kalır
+            for mkey in {r["market_key"] for r in cur_rows if not is_detail_key(r["market_key"])}:
+                con.execute("DELETE FROM odds_current WHERE event_id=? AND market_key=?", (e.id, mkey))
+            changed += _write_markets(con, e.id, e.markets, fetched_at, prev)
         con.execute("DELETE FROM odds_current WHERE event_id IN (SELECT id FROM iddaa_events WHERE active=0)")
         db.meta_set(con, "iddaa_last_fetch", fetched_at)
     progress(f"iddaa bülteni: {len(events)} futbol maçı, {changed} oran değişikliği arşivlendi")
     return {"events": len(events), "odds_changed": changed}
+
+
+def details_due(con: sqlite3.Connection, now: datetime | None = None) -> list[sqlite3.Row]:
+    """Detayı (korner/kart pazarları) çekilecek etkinlikler: ESPN maçıyla eşleşmiş (modelin kapsadığı lig), satışta ve
+    IDDAA_DETAIL_HORIZON_H saat içinde başlayacak; son çekimden IDDAA_DETAIL_REFRESH_H saat geçmiş ya da başlamaya
+    IDDAA_DETAIL_NEAR_H saatten az kalmış ve IDDAA_DETAIL_NEAR_REFRESH_MIN dakika geçmiş. En yakın maç önce."""
+    now = now or utcnow()
+    rows = con.execute(
+        """SELECT e.id, e.kickoff_utc, e.detail_fetched_at FROM iddaa_events e JOIN matches m ON m.id = e.espn_match_id
+           WHERE e.active=1 AND e.is_live=0 AND e.kickoff_utc > ? AND e.kickoff_utc <= ? ORDER BY e.kickoff_utc, e.id""",
+        (iso(now), iso(now + timedelta(hours=IDDAA_DETAIL_HORIZON_H))),
+    ).fetchall()
+    out = []
+    for r in rows:
+        if r["detail_fetched_at"] is None:
+            out.append(r)
+            continue
+        age = now - parse_iso(r["detail_fetched_at"])
+        to_kick = parse_iso(r["kickoff_utc"]) - now
+        if age >= timedelta(hours=IDDAA_DETAIL_REFRESH_H) or (
+            to_kick <= timedelta(hours=IDDAA_DETAIL_NEAR_H) and age >= timedelta(minutes=IDDAA_DETAIL_NEAR_REFRESH_MIN)
+        ):
+            out.append(r)
+    return out[:IDDAA_DETAIL_MAX_PER_RUN]
+
+
+async def ingest_iddaa_details(con: sqlite3.Connection, progress: Progress, dump_dir: Path | None = None) -> dict[str, int]:
+    """Maç detayından korner/kart pazarları (toplu bültende yok). Etkinlik başına detay ailelerinin oranları tamamen
+    yenilenir (kalkan çizgiler silinir), değişen oranlar odds_history'ye arşivlenir. dump_dir verilirse ham yanıtlar
+    oraya yazılır (doğrulama çalıştırmaları için). Hiçbir istek başarılı olmazsa hata fırlatır (çağıran uyarı yazar)."""
+    todo = details_due(con)
+    if not todo:
+        progress("iddaa maç detayı: çekilecek maç yok")
+        return {"due": 0, "fetched": 0, "errors": 0, "markets": 0, "odds_changed": 0, "requests": 0}
+    t0 = time.monotonic()
+    async with PoliteClient(concurrency=IDDAA_DETAIL_CONCURRENCY, min_interval=IDDAA_DETAIL_MIN_INTERVAL_S) as client:
+        async def one(eid: int) -> tuple[int, dict | None, str | None]:
+            try:
+                return eid, await iddaa.fetch_event_detail(client, eid), None
+            except FetchError as e:
+                return eid, None, str(e)
+
+        results = await asyncio.gather(*(one(int(r["id"])) for r in todo))
+        n_requests = client.requests
+    elapsed = time.monotonic() - t0
+    fetched_at = iso(utcnow())
+    stats = {"due": len(todo), "fetched": 0, "errors": 0, "markets": 0, "odds_changed": 0, "requests": n_requests}
+    with db.tx(con):
+        for eid, payload, err in results:
+            if payload is None:
+                stats["errors"] += 1
+                log.error("iddaa maç detayı alınamadı %s: %s", eid, err)
+                continue
+            if dump_dir is not None:
+                dump_dir.mkdir(parents=True, exist_ok=True)
+                (dump_dir / f"event_{eid}.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            try:
+                ev = iddaa.parse_event_detail(payload, eid)
+            except (ValueError, KeyError, TypeError) as e:
+                stats["errors"] += 1
+                log.error("iddaa maç detayı çözülemedi %s: %s", eid, e)
+                continue
+            cur_rows = con.execute("SELECT market_key, outcome_no, odd FROM odds_current WHERE event_id=?", (eid,)).fetchall()
+            prev = _odds_signature([(r["market_key"], r["outcome_no"], r["odd"]) for r in cur_rows if is_detail_key(r["market_key"])])
+            for mkey in {k for k, _ in prev}:
+                con.execute("DELETE FROM odds_current WHERE event_id=? AND market_key=?", (eid, mkey))
+            con.execute("UPDATE iddaa_events SET detail_fetched_at=? WHERE id=?", (fetched_at, eid))
+            stats["fetched"] += 1
+            if ev is None or ev.is_live:
+                continue  # etkinlik detayı yok / başlamış: maç öncesi korner/kart oranı tutulmaz
+            stats["markets"] += len(ev.markets)
+            stats["odds_changed"] += _write_markets(con, eid, ev.markets, fetched_at, prev)
+    progress(f"iddaa maç detayı: {stats['fetched']}/{stats['due']} maç, {stats['markets']} korner/kart pazarı, "
+             f"{stats['odds_changed']} oran değişikliği, {n_requests} istek, {elapsed:.1f} sn, {stats['errors']} hata")
+    if stats["fetched"] == 0:
+        raise RuntimeError(f"iddaa maç detaylarının hiçbiri alınamadı ({stats['errors']} hata)")
+    return stats
 
 
 def repair_missing_stats(con: sqlite3.Connection) -> int:
@@ -295,6 +394,32 @@ def repair_missing_stats(con: sqlite3.Connection) -> int:
             con.execute("UPDATE player_match SET shots=NULL, shots_on_target=NULL WHERE match_id=?", (mid,))
             con.execute("UPDATE matches SET summary_status='missing_players' WHERE id=? AND summary_status='ok'", (mid,))
     return len(bad)
+
+
+def backfill_card_points(con: sqlite3.Connection) -> int:
+    """Saklı ham özetlerden iddaa kart sayımını (espn.card_counts) eski kayıtlara yazar (idempotent: yalnız boş olanlar).
+    Olay listesi olmayan özetlerde değer boş kalır (kart yok sayılmaz)."""
+    rows = con.execute(
+        """SELECT r.match_id, r.payload FROM raw_summaries r JOIN matches m ON m.id=r.match_id
+           WHERE m.completed=1 AND EXISTS (SELECT 1 FROM team_match_stats s WHERE s.match_id=r.match_id
+                                          AND s.card_points IS NULL)"""
+    ).fetchall()
+    n = 0
+    with db.tx(con):
+        for r in rows:
+            try:
+                payload = json.loads(zlib.decompress(r["payload"]).decode("utf-8"))
+            except (zlib.error, ValueError):
+                continue
+            tids = [x["team_id"] for x in con.execute("SELECT team_id FROM team_match_stats WHERE match_id=?", (r["match_id"],))]
+            cards = espn.card_counts(payload, tids)
+            for tid, cc in cards.items():
+                con.execute(
+                    "UPDATE team_match_stats SET card_points=?, card_points_ht=?, red_cards_90=? WHERE match_id=? AND team_id=?",
+                    (cc.points, cc.points_ht, cc.reds, r["match_id"], tid),
+                )
+            n += int(bool(cards))
+    return n
 
 
 def backfill_periods(con: sqlite3.Connection) -> int:

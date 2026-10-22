@@ -6,7 +6,9 @@ import { dateTime, lineText, odd, pct } from "@/lib/format";
 import type { IddaaMarket, MatchDetail } from "@/lib/types";
 import { EvTag } from "../ui";
 
-const FAMILY_LABEL: Record<string, string> = { ms: "Sonuç", au: "Gol", kg: "Karşılıklı gol", iy: "İlk yarı", korner: "Korner" };
+const FAMILY_LABEL: Record<string, string> = {
+  ms: "Sonuç", au: "Gol", kg: "Karşılıklı gol", iy: "İlk yarı", korner: "Korner", kart: "Kart",
+};
 
 export default function IddaaMarkets({ d }: { d: MatchDetail }) {
   const markets = d.iddaa!.markets;
@@ -64,8 +66,11 @@ export default function IddaaMarkets({ d }: { d: MatchDetail }) {
       <p className="text-xs leading-relaxed text-muted">
         Model: skor modelinden olasılık · Piyasa: iddaa oranından marjı orantısal arındırılmış olasılık · EV, harman olasılığı
         × oran − 1&apos;dir. Harman, iddaa&apos;nın ana pazarlarına uydurulan &quot;piyasa skor matrisi&quot; ile model skor matrisinin
-        hücre bazında geometrik ortalamasıdır; bu yüzden tüm pazarlar birbiriyle tutarlıdır. Soluk etiketli pazar aileleri
-        backtest doğrulamasından geçmediği için otomatik kuponlara alınmaz.
+        hücre bazında geometrik ortalamasıdır; bu yüzden tüm pazarlar birbiriyle tutarlıdır. Korner ve kart pazarları skor
+        modelinden bağımsızdır: takım başına sayım modelinden gelir ve harman pazar içinde yapılır (oranlar maç detayından,
+        birkaç saatte bir). Tek yönlü sunulan pazarda (ör. yalnız &quot;Kırmızı kart: Evet&quot;) piyasa olasılığı marjlı 1/orandır.
+        Soluk etiketli pazarlar backtest doğrulamasından geçmedi; otomatik kuponlarda yalnız korner/kart kuponuna
+        &quot;deneysel&quot; etiketiyle girer.
       </p>
     </div>
   );

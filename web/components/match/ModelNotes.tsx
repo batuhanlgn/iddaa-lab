@@ -2,7 +2,9 @@ import { dateTime, pct } from "@/lib/format";
 import type { MatchDetail } from "@/lib/types";
 import { SectionTitle } from "../ui";
 
-const FAM: Record<string, string> = { ms: "Maç sonucu", au: "Alt/Üst", kg: "Karşılıklı gol", iy: "İlk yarı", korner: "Korner" };
+const FAM: Record<string, string> = {
+  ms: "Maç sonucu", au: "Alt/Üst", kg: "Karşılıklı gol", iy: "İlk yarı", korner: "Korner", kart: "Kart",
+};
 
 export default function ModelNotes({ d }: { d: MatchDetail }) {
   const m = d.model!;

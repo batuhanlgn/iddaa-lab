@@ -1,6 +1,7 @@
 import { Suspense } from "react";
 import Calibration from "@/components/charts/Calibration";
 import ErrorPanel from "@/components/ErrorPanel";
+import AuxBacktestSection from "@/components/AuxBacktestSection";
 import ScoutBacktestSection from "@/components/ScoutBacktestSection";
 import { EmptyState, PageHeader, SectionTitle, SkeletonRows, Stat } from "@/components/ui";
 import { dateTime, marketLine, odd, pct, signedPct } from "@/lib/format";
@@ -15,7 +16,8 @@ const FAM: Record<string, string> = {
   kg: "Karşılıklı gol",
   iy: "İlk yarı sonucu",
   iyms: "İY/MS",
-  korner: "Korner 9.5 (deneysel)",
+  korner: "Korner (tüm pazarlar ve çizgiler)",
+  kart: "Kart (tüm pazarlar ve çizgiler)",
 };
 const PLAYER: Record<string, string> = {
   p_sot_1: "Oyuncu 1+ isabetli şut",
@@ -139,6 +141,8 @@ async function Perf() {
           hatası &lt; %3.
         </p>
       </section>
+
+      <AuxBacktestSection bt={bt} />
 
       <section>
         <SectionTitle right={<span className="kicker">tüm sonuçlar · nokta büyüklüğü = örnek</span>}>Kalibrasyon</SectionTitle>
