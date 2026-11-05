@@ -8,6 +8,7 @@ const LINKS = [
   { href: "/canli", label: "Canlı" },
   { href: "/kuponlar", label: "Kuponlar" },
   { href: "/spor-toto", label: "Spor Toto" },
+  { href: "/surpriz", label: "Sürpriz" },
   { href: "/oyuncular", label: "Oyuncular" },
   { href: "/puan-durumu", label: "Puan Durumu" },
   { href: "/performans", label: "Performans" },

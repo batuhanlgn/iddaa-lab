@@ -233,12 +233,13 @@ def _odds_signature(rows: list[tuple[str, int, float]]) -> dict[tuple[str, int],
 
 
 def is_detail_key(market_key: str) -> bool:
-    """market_key "t:st:sov" maç detayından çekilen bir aileye (korner, kart) mi ait?"""
+    """market_key "t:st:sov" maç detayından çekilen bir aileye (korner, kart) ya da detaya özgü bir gol çizgisine mi ait?"""
     parts = market_key.split(":")
     try:
-        return (int(parts[0]), int(parts[1])) in iddaa.DETAIL_MARKETS
+        t, st = int(parts[0]), int(parts[1])
     except (ValueError, IndexError):
         return False
+    return (t, st) in iddaa.DETAIL_MARKETS or (t, st, parts[2] if len(parts) > 2 else "") in iddaa.DETAIL_EXTRA_LINES
 
 
 def _write_markets(con: sqlite3.Connection, event_id: int, markets: list[iddaa.Market], fetched_at: str,
@@ -370,7 +371,7 @@ async def ingest_iddaa_details(con: sqlite3.Connection, progress: Progress, dump
                 continue  # etkinlik detayı yok / başlamış: maç öncesi korner/kart oranı tutulmaz
             stats["markets"] += len(ev.markets)
             stats["odds_changed"] += _write_markets(con, eid, ev.markets, fetched_at, prev)
-    progress(f"iddaa maç detayı: {stats['fetched']}/{stats['due']} maç, {stats['markets']} korner/kart pazarı, "
+    progress(f"iddaa maç detayı: {stats['fetched']}/{stats['due']} maç, {stats['markets']} korner/kart/5.5 pazarı, "
              f"{stats['odds_changed']} oran değişikliği, {n_requests} istek, {elapsed:.1f} sn, {stats['errors']} hata")
     if stats["fetched"] == 0:
         raise RuntimeError(f"iddaa maç detaylarının hiçbiri alınamadı ({stats['errors']} hata)")

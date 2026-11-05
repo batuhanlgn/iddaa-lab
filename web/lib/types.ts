@@ -984,3 +984,32 @@ export type TotoCrowdBacktestResponse =
       weeks: TotoCrowdBtWeek[];
       notes: string[];
     };
+
+// ---------------------------------------------------------------- sürpriz adayları (backend/app/surprise.py)
+
+export interface SurpriseRow {
+  match_id: string;
+  date_utc: string;
+  league_name: string;
+  country: string;
+  home: string;
+  away: string;
+  home_logo?: string | null;
+  away_logo?: string | null;
+  selection: string;
+  p_model: number;
+  /** iddaa oranı; 5.5 Üst'te iddaa sunmuyorsa null */
+  odd: number | null;
+  p_market: number | null;
+  fair_odd: number | null;
+  ev_model: number | null;
+  confidence: Confidence;
+  goals_expected: number;
+}
+
+export interface SurpriseResponse {
+  generated_at: string;
+  days: number;
+  reversal: { by_value: SurpriseRow[]; by_prob: SurpriseRow[]; n: number; median_margin: number | null };
+  over55: { by_value: SurpriseRow[]; by_prob: SurpriseRow[]; n: number; n_offered: number };
+}

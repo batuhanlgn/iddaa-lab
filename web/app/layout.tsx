@@ -1,13 +1,9 @@
 import type { Metadata } from "next";
-import { Big_Shoulders, Instrument_Sans, JetBrains_Mono } from "next/font/google";
 import { Suspense } from "react";
 import Nav from "@/components/Nav";
 import StatusPill from "@/components/StatusPill";
+import "./fonts.css";
 import "./globals.css";
-
-const display = Big_Shoulders({ variable: "--font-bsd", subsets: ["latin", "latin-ext"], weight: ["600", "800", "900"] });
-const body = Instrument_Sans({ variable: "--font-ins", subsets: ["latin", "latin-ext"] });
-const mono = JetBrains_Mono({ variable: "--font-jbm", subsets: ["latin", "latin-ext"], weight: ["400", "600"] });
 
 export const metadata: Metadata = {
   title: "iddaa·lab — maç analizi ve simülasyon",
@@ -19,7 +15,7 @@ const themeScript = `try{var t=localStorage.getItem("iddaa-lab-theme");if(t==="l
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="tr" className={`${display.variable} ${body.variable} ${mono.variable} h-full antialiased`} suppressHydrationWarning>
+    <html lang="tr" className="h-full antialiased" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
       </head>

@@ -16,7 +16,7 @@ from ..config import (
     AUX_DEFAULT_PARAMS, AUX_HT_SHARE_PRIOR, AUX_TAU, BLEND_WEIGHT_DEFAULT, DATA_DIR, DEFAULT_SIGMA, DEFAULT_TAU,
     DEFAULT_XI, LEAGUE_BY_SLUG, N_SCENARIOS, N_SIMS, REFERENCE_LEAGUE,
 )
-from ..sources.iddaa import MARKETS, ONE_SIDED_KEYS, MarketDef
+from ..sources.iddaa import MARKETS, ONE_SIDED_GOAL_LINES, ONE_SIDED_KEYS, MarketDef
 from . import aux_markets as ax
 from . import markets as mk
 from .count_model import CountModel, fit_count_model, nb_dispersion
@@ -323,6 +323,23 @@ def _aux_market(md: MarketDef, sov: str | None, rs: list[dict[str, Any]], j: ax.
     return p_model, q, mk.blend(p_model, q, blend_w), mk.margin(odds)
 
 
+def _one_sided_goal(md: MarketDef, sov: str | None, r: dict[str, Any], j_model: mk.Joint, j_blend: mk.Joint | None,
+                    blend_w: float) -> dict[str, Any] | None:
+    """Tek yönlü gol çizgisi (ör. yalnız "5.5 Üst" açık, "Alt" 1.00 = kapalı): marj arındırılamaz, piyasa olasılığı 1/oran
+    (marjlı, yani gerçekten yüksek -> model daha emin görünmez). p_safe = min(matris harmanı, iki sonuçlu pazar içi harman)."""
+    mask = mk.outcome_mask(md.key, sov, r["outcome_name"], j_model)
+    if mask is None:
+        return None
+    odd = float(r["odd"])
+    pm = float(mk.prob(j_model, mask))
+    q = min(1.0 / odd, 0.999)
+    p_local = float(mk.blend([pm, 1.0 - pm], [q, 1.0 - q], blend_w)[0])
+    pb = float(mk.prob(j_blend, mask)) if j_blend is not None else None
+    p_safe = min(pb, p_local) if pb is not None else p_local
+    return {"no": r["outcome_no"], "name": r["outcome_name"], "odd": odd, "p_model": pm, "p_market": q, "p_blend": pb,
+            "p_safe": p_safe, "ev": p_safe * odd - 1.0, "ev_model": pm * odd - 1.0}
+
+
 def markets_from_rows(rows: list[dict[str, Any]], sm_model: np.ndarray, j_model: mk.Joint, p1: float, rho: float,
                       aux: dict[str, ax.CountJoint] | None, blend_w: float, validated: dict[str, bool],
                       start: tuple[float, float], market_ok: dict[str, bool] | None = None
@@ -380,6 +397,15 @@ def markets_from_rows(rows: list[dict[str, Any]], sm_model: np.ndarray, j_model:
                 "mbs": rs[0]["mbs"], "margin": marg, "family_validated": fam_ok,
                 "fetched_at": rs[0]["fetched_at"], "outcomes": outs_a,
             })
+            continue
+        if (md.key, sov_v) in ONE_SIDED_GOAL_LINES and len(rs) == 1:
+            one = _one_sided_goal(md, sov_v, rs[0], j_model, j_blend, blend_w)
+            if one is not None:
+                out.append({
+                    "market_key": mkey, "key": md.key, "label": md.label, "family": md.family, "line": sov_v,
+                    "mbs": rs[0]["mbs"], "margin": None, "family_validated": fam_ok,
+                    "fetched_at": rs[0]["fetched_at"], "outcomes": [one],
+                })
             continue
         q = mk.devig(odds)
         p_model: list[float] = []

@@ -22,6 +22,7 @@ const STATIC_ROUTES: [RegExp, (m: RegExpMatchArray) => string][] = [
   [/^\/api\/live\/base$/, () => "live_base.json"],
   [/^\/api\/standings$/, () => "standings.json"],
   [/^\/api\/toto$/, () => "toto.json"],
+  [/^\/api\/surprise$/, () => "surprise.json"],
   [/^\/api\/toto\/backtest$/, () => "toto_backtest.json"],
   [/^\/api\/toto\/crowd-backtest$/, () => "toto_crowd_backtest.json"],
 ];

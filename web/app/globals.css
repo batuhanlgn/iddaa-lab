@@ -5,7 +5,7 @@
    Koyu varsayılan; açık tema ayrı seçilmiş adımlarla (otomatik ters çevirme değil).
    Veri renkleri: ev = mavi, deplasman = turuncu, beraberlik = nötr gri
    (dataviz doğrulayıcısından geçti: koyu ve açık zeminde).
-   Font değişkenleri next/font tarafından verilir: --font-bsd, --font-ins, --font-jbm
+   Font değişkenleri app/fonts.css içinde (depodaki woff2): --font-bsd, --font-ins, --font-jbm
 ------------------------------------------------------------------- */
 
 :root {

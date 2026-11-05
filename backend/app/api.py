@@ -408,6 +408,13 @@ def toto_crowd_backtest() -> dict[str, Any]:
     return {"available": True, **r}
 
 
+@app.get("/api/surprise")
+def surprise() -> dict[str, Any]:
+    from .surprise import surprise_candidates
+
+    return surprise_candidates(con())
+
+
 @app.get("/api/leagues")
 def leagues() -> dict[str, Any]:
     return {"leagues": [{"slug": lg.slug, "name": lg.name, "country": lg.country, "is_cup": lg.is_cup} for lg in LEAGUES]}

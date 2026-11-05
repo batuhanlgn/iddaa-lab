@@ -68,6 +68,10 @@ DETAIL_MARKETS: frozenset[tuple[int, int]] = frozenset(k for k, d in MARKETS.ite
 # Tek yönlü sunulabilen pazarlar: iddaa bazen yalnız bir sonucu açar (ör. "Kırmızı Kart Olur Mu"da Hayır 1.00 = kapalı).
 # Bu pazarlarda marj arındırılamaz; açık sonucun ham olasılığı (1/oran) piyasa olasılığı sayılır (muhafazakâr).
 ONE_SIDED_KEYS = frozenset({"kirmizi"})
+# Toplu bültende olmayan, yalnız maç detayında sunulan tekil gol çizgileri (t, st, sov). 5.5 Üst sürpriz adayları için
+# gerekli; iddaa bu çizgide "Alt"ı çoğunlukla 1.00 ile kapatır -> tek yönlü işlenir (pipeline).
+DETAIL_EXTRA_LINES: frozenset[tuple[int, int, str]] = frozenset({(2, 101, "5.5")})
+ONE_SIDED_GOAL_LINES: frozenset[tuple[str, str]] = frozenset({("au", "5.5")})
 
 
 @dataclass
@@ -106,11 +110,14 @@ def _iso(epoch: int) -> str:
     return datetime.fromtimestamp(epoch, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _parse_markets(e: dict[str, Any], keys: frozenset[tuple[int, int]] | None = None) -> list[Market]:
+def _parse_markets(e: dict[str, Any], keys: frozenset[tuple[int, int]] | None = None,
+                   extra_lines: frozenset[tuple[int, int, str]] = frozenset()) -> list[Market]:
     markets: list[Market] = []
     for m in e.get("m", []):
         tk = (m.get("t"), m.get("st"))
-        if tk not in MARKETS or (keys is not None and tk not in keys):
+        if tk not in MARKETS:
+            continue
+        if keys is not None and tk not in keys and (tk[0], tk[1], str(m.get("sov"))) not in extra_lines:
             continue
         outs = [
             Outcome(no=int(o["no"]), name=str(o.get("n", "")), odd=float(o["odd"]))
@@ -122,7 +129,8 @@ def _parse_markets(e: dict[str, Any], keys: frozenset[tuple[int, int]] | None = 
     return markets
 
 
-def _event(e: dict[str, Any], now: float, keys: frozenset[tuple[int, int]] | None = None) -> IddaaEvent:
+def _event(e: dict[str, Any], now: float, keys: frozenset[tuple[int, int]] | None = None,
+           extra_lines: frozenset[tuple[int, int, str]] = frozenset()) -> IddaaEvent:
     return IddaaEvent(
         id=int(e["i"]),
         competition_id=e.get("ci"),
@@ -131,7 +139,7 @@ def _event(e: dict[str, Any], now: float, keys: frozenset[tuple[int, int]] | Non
         kickoff_utc=_iso(int(e["d"])),
         mbs=e.get("mbc"),
         is_live=int(e["d"]) <= now,
-        markets=_parse_markets(e, keys),
+        markets=_parse_markets(e, keys, extra_lines),
     )
 
 
@@ -145,14 +153,15 @@ def parse_events(payload: dict[str, Any]) -> list[IddaaEvent]:
 
 
 def parse_event_detail(payload: dict[str, Any], event_id: int) -> IddaaEvent | None:
-    """Maç detayı (/sportsbook/event/{id}): yalnız detaydan alınan ailelerin (korner, kart) pazarları.
+    """Maç detayı (/sportsbook/event/{id}): yalnız detaydan alınan ailelerin (korner, kart) pazarları ve toplu bültende
+    olmayan tekil gol çizgileri (DETAIL_EXTRA_LINES, ör. 5.5 Alt/Üst).
     Yanıt başka bir etkinliğe aitse ya da futbol değilse None."""
     if not payload.get("isSuccess"):
         raise ValueError(f"iddaa maç detayı başarısız yanıt döndü ({event_id})")
     e = payload.get("data")
     if not isinstance(e, dict) or e.get("sid") != 1 or "d" not in e or int(e.get("i", -1)) != event_id:
         return None
-    return _event(e, datetime.now(timezone.utc).timestamp(), DETAIL_MARKETS)
+    return _event(e, datetime.now(timezone.utc).timestamp(), DETAIL_MARKETS, DETAIL_EXTRA_LINES)
 
 
 def parse_competitions(payload: dict[str, Any]) -> list[dict[str, Any]]:
